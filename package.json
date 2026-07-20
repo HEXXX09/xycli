@@ -13,12 +13,18 @@
     "dev": "tsx src/cli.ts",
     "typecheck": "tsc --noEmit"
   },
-  "keywords": ["cli", "ai", "coding", "agent"],
+  "keywords": [
+    "cli",
+    "ai",
+    "coding",
+    "agent"
+  ],
   "license": "MIT",
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
     "chalk": "^5.4.1",
     "commander": "^13.1.0",
+    "openai": "^6.48.0",
     "ora": "^8.2.0",
     "uuid": "^11.1.0",
     "zod": "^3.24.2"

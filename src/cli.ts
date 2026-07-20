@@ -11,8 +11,9 @@ program
   .version(VERSION)
   .argument("[prompt]", "Natural language prompt for the AI agent")
   .option("--model <model>", "Model to use", "claude-sonnet-4-5-20250929")
+  .option("--provider <provider>", "Provider: anthropic or deepseek", "anthropic")
   .option("--max-turns <turns>", "Maximum agent loop iterations", "25")
-  .action(async (prompt: string | undefined, options: { model: string; maxTurns: string }) => {
+  .action(async (prompt: string | undefined, options: { model: string; provider: string; maxTurns: string }) => {
     if (!prompt) {
       program.outputHelp();
       process.exit(0);
@@ -21,26 +22,49 @@ program
     const cwd = process.cwd();
     const maxTurns = parseInt(options.maxTurns, 10);
 
-    // Lazy-load heavy dependencies
-    const { AnthropicProvider } = await import("./providers/anthropic.js");
+    // 根据 provider 参数创建对应的实例
+    let provider;
+    const providerType = options.provider.toLowerCase();
+    
+    if (providerType === "deepseek") {
+      const { DeepSeekProvider } = await import("./providers/deepseek.js");
+      const model = options.model === "claude-sonnet-4-5-20250929" ? "deepseek-chat" : options.model;
+      try {
+        provider = new DeepSeekProvider();
+        console.log(`Provider: DeepSeek (${model})`);
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : "Failed to initialize provider";
+        console.error(message);
+        console.error(
+          "Set DEEPSEEK_API_KEY environment variable.\n" +
+          "Example: export DEEPSEEK_API_KEY=sk-..."
+        );
+        process.exit(4);
+      }
+      // 用 deepseek 模型覆盖
+      options.model = model;
+    } else {
+      // 默认 Anthropic
+      const { AnthropicProvider } = await import("./providers/anthropic.js");
+      try {
+        provider = new AnthropicProvider();
+        console.log(`Provider: Anthropic (${options.model})`);
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : "Failed to initialize provider";
+        console.error(message);
+        console.error(
+          "Set ANTHROPIC_API_KEY environment variable to use XYCLI.\n" +
+          "Example: export ANTHROPIC_API_KEY=sk-ant-..."
+        );
+        process.exit(4);
+      }
+    }
+
+    // 动态加载核心模块
     const { DefaultToolRegistry } = await import("./tools/registry.js");
     const { registerBuiltins } = await import("./tools/builtins.js");
     const { JsonSessionStore } = await import("./session/json-store.js");
     const { runAgent } = await import("./core/agent-loop.js");
-
-    // Build provider
-    let provider;
-    try {
-      provider = new AnthropicProvider();
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : "Failed to initialize provider";
-      console.error(message);
-      console.error(
-        "Set ANTHROPIC_API_KEY environment variable to use XYCLI.\n" +
-        "Example: export ANTHROPIC_API_KEY=sk-ant-..."
-      );
-      process.exit(4);
-    }
 
     // Build tool registry with built-in tools
     const toolRegistry = new DefaultToolRegistry();
