@@ -15,7 +15,12 @@ program
   .option("--provider <provider>", "provider: anthropic 或 deepseek", "deepseek")
   .option("--max-turns <turns>", "最大 agent 循环次数", "25")
   .option("-i, --interactive", "强制交互模式")
-  .action(async (prompt: string | undefined, options: { model: string; provider: string; maxTurns: string; interactive: boolean }) => {
+  .option(
+    "--permission <mode>",
+    "权限模式: read-only、auto-safe 或 full-access",
+    "auto-safe"
+  )
+  .action(async (prompt: string | undefined, options: { model: string; provider: string; maxTurns: string; interactive: boolean; permission: string }) => {
     const cwd = process.cwd();
     const maxTurns = parseInt(options.maxTurns, 10);
     const providerType = options.provider.toLowerCase();
@@ -43,14 +48,19 @@ program
     const { registerBuiltins } = await import("./tools/builtins.js");
     const { JsonSessionStore } = await import("./session/json-store.js");
     const { runAgent } = await import("./core/agent-loop.js");
+    const { PermissionGuard } = await import("./core/permission-guard.js");
 
     const toolRegistry = new DefaultToolRegistry();
     registerBuiltins(toolRegistry);
     const sessionStore = new JsonSessionStore(cwd);
 
+    // Normalize permission mode
+    const permissionMode = PermissionGuard.normalizeMode(options.permission);
+
     console.log(`\n  XYCLI v${VERSION} — AI 编程助手`);
     console.log(`  Provider: ${providerType === "deepseek" ? "DeepSeek" : "Anthropic"}  |  模型: ${model}`);
     console.log(`  工作目录: ${cwd}`);
+    console.log(`  权限模式: ${permissionMode}`);
     console.log(`  输入 /help 查看命令，/exit 退出\n`);
 
     // ============================================================
@@ -79,6 +89,7 @@ program
           provider,
           toolRegistry,
           sessionStore,
+          permissionMode,
           signal: abortController.signal,
         });
 

@@ -9,6 +9,8 @@ import type { SessionStore, Session, Message, ToolCallRecord } from "../session/
 import type { AgentLoopState, SessionStatus } from "./types.js";
 import { buildSystemPrompt } from "./prompts.js";
 import { ProviderError, ToolError } from "./errors.js";
+import { PermissionGuard } from "./permission-guard.js";
+import type { PermissionMode } from "./permission-guard.js";
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -22,6 +24,7 @@ export interface AgentRunConfig {
   provider: IProvider;
   toolRegistry: ToolRegistry;
   sessionStore: SessionStore;
+  permissionMode?: PermissionMode;
   signal?: AbortSignal;
 }
 
@@ -37,7 +40,20 @@ export interface AgentRunResult {
 // ---------------------------------------------------------------------------
 
 export async function runAgent(config: AgentRunConfig): Promise<AgentRunResult> {
-  const { prompt, model, maxTurns, cwd, provider, toolRegistry, sessionStore, signal } = config;
+  const {
+    prompt,
+    model,
+    maxTurns,
+    cwd,
+    provider,
+    toolRegistry,
+    sessionStore,
+    permissionMode = "auto-safe",
+    signal,
+  } = config;
+
+  // Construct permission guard
+  const permissionGuard = new PermissionGuard(permissionMode);
 
   // Create session
   const sessionId = uuidv4();
@@ -161,6 +177,54 @@ export async function runAgent(config: AgentRunConfig): Promise<AgentRunResult> 
           }
 
           const startedAt = new Date().toISOString();
+
+          // -----------------------------------------------------------------
+          // Permission check (M1-T09)
+          // -----------------------------------------------------------------
+          const tool = toolRegistry.get(toolCall.name);
+
+          if (tool) {
+            const decision = permissionGuard.evaluate(tool.permissionLevel);
+
+            if (!decision.allowed) {
+              const endedAt = new Date().toISOString();
+              const durationMs =
+                Date.now() - new Date(startedAt).getTime();
+              const error = permissionGuard.deniedPayload({
+                toolName: toolCall.name,
+                requiredLevel: tool.permissionLevel,
+              });
+
+              const deniedRecord: ToolCallRecord = {
+                id: toolCall.id,
+                toolName: toolCall.name,
+                input: toolCall.input,
+                output: null,
+                error: error.message,
+                status: "denied",
+                durationMs,
+                startedAt,
+                endedAt,
+              };
+              session.toolCalls.push(deniedRecord);
+
+              const deniedMsg: Message = {
+                id: uuidv4(),
+                role: "tool",
+                content: JSON.stringify({ error }),
+                toolCallId: toolCall.id,
+                sequence: session.messages.length,
+                createdAt: endedAt,
+              };
+              session.messages.push(deniedMsg);
+
+              continue;
+            }
+          }
+
+          // -----------------------------------------------------------------
+          // Execute tool
+          // -----------------------------------------------------------------
           const toolResult = await toolRegistry.execute(
             toolCall.name,
             toolCall.input,
