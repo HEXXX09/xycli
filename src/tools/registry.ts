@@ -1,5 +1,5 @@
 // ============================================================================
-// Tool Registry — centralized tool registration and execution
+// 工具注册中心——统一负责注册、校验和执行
 // ============================================================================
 
 import { v4 as uuidv4 } from "uuid";
@@ -7,14 +7,15 @@ import type { ITool, ToolResult, ToolExecutionContext } from "./types.js";
 import type { PermissionLevel } from "../core/types.js";
 import type { StructuredLogger } from "./types.js";
 import { ToolError } from "../core/errors.js";
+import { PermissionGuard, type PermissionMode } from "../core/permission-guard.js";
 
 // ---------------------------------------------------------------------------
-// Minimal permission policy for M1 (full policy in M9)
+// M1 最小权限策略，M9 再扩展完整规则
 // ---------------------------------------------------------------------------
 
-function defaultPolicy() {
+function defaultPolicy(mode: PermissionMode) {
   return {
-    mode: "ask" as const,
+    mode,
     defaultLevel: "read-only" as PermissionLevel,
     allow: { commands: [], paths: [], domains: [], tools: [], mcpServers: [], plugins: [] },
     deny: { commands: [], paths: [], domains: [], tools: [], mcpServers: [], plugins: [] },
@@ -31,7 +32,7 @@ function defaultLogger(): StructuredLogger {
 }
 
 // ---------------------------------------------------------------------------
-// ToolRegistry
+// 工具注册中心接口与默认实现
 // ---------------------------------------------------------------------------
 
 export interface ToolRegistry {
@@ -44,7 +45,8 @@ export interface ToolRegistry {
     input: object,
     sessionId: string,
     cwd: string,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    permissionMode?: PermissionMode
   ): Promise<ToolResult>;
 }
 
@@ -53,7 +55,7 @@ export class DefaultToolRegistry implements ToolRegistry {
 
   register(tool: ITool): void {
     if (this.tools.has(tool.name)) {
-      throw new ToolError(`Tool "${tool.name}" is already registered.`);
+      throw new ToolError(`工具“${tool.name}”已经注册。`);
     }
     this.tools.set(tool.name, tool);
   }
@@ -78,7 +80,8 @@ export class DefaultToolRegistry implements ToolRegistry {
     input: object,
     sessionId: string,
     cwd: string,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    permissionMode: PermissionMode = "auto-safe"
   ): Promise<ToolResult> {
     const tool = this.tools.get(name);
     if (!tool) {
@@ -87,7 +90,7 @@ export class DefaultToolRegistry implements ToolRegistry {
         output: null,
         error: {
           code: "TOOL_NOT_FOUND",
-          message: `Tool "${name}" is not registered. Available tools: ${Array.from(this.tools.keys()).join(", ")}`,
+          message: `工具“${name}”尚未注册。可用工具：${Array.from(this.tools.keys()).join(", ")}`,
           retryable: false,
           details: {},
         },
@@ -98,16 +101,36 @@ export class DefaultToolRegistry implements ToolRegistry {
       };
     }
 
+    if (!PermissionGuard.check(tool.permissionLevel, permissionMode)) {
+      const denied = PermissionGuard.deniedPayload({
+        toolName: tool.name,
+        requiredLevel: tool.permissionLevel,
+        mode: permissionMode,
+      });
+      const timestamp = new Date().toISOString();
+      return {
+        success: false,
+        output: null,
+        error: denied,
+        durationMs: 0,
+        startedAt: timestamp,
+        endedAt: timestamp,
+        metadata: {},
+      };
+    }
+
     const callId = uuidv4();
     const startedAt = new Date().toISOString();
 
-    // Use a timeout signal combined with the caller's signal
+    // 将工具超时和调用方中断信号合并到同一个控制器。
     const abortController = new AbortController();
     const timeoutMs = tool.defaultTimeoutMs || 120_000;
     const timeoutId = setTimeout(() => abortController.abort(), timeoutMs);
 
+    const abortListener = () => abortController.abort(signal?.reason);
     if (signal) {
-      signal.addEventListener("abort", () => abortController.abort(), { once: true });
+      if (signal.aborted) abortListener();
+      else signal.addEventListener("abort", abortListener, { once: true });
     }
 
     const context: ToolExecutionContext = {
@@ -116,16 +139,40 @@ export class DefaultToolRegistry implements ToolRegistry {
       cwd,
       env: { ...process.env } as Record<string, string>,
       signal: abortController.signal,
-      permissions: defaultPolicy(),
+      permissions: defaultPolicy(permissionMode),
       logger: defaultLogger(),
       startedAt,
     };
 
     try {
-      const idempotencyKey = tool.idempotencyKey(input, context);
+      const parsed = tool.inputValidator.safeParse(input);
+      if (!parsed.success) {
+        return {
+          success: false,
+          output: null,
+          error: {
+            code: "INVALID_TOOL_INPUT",
+            message: `工具“${name}”的输入参数无效。`,
+            retryable: false,
+            details: {
+              issues: parsed.error.issues.map((issue) => ({
+                path: issue.path.join("."),
+                message: issue.message,
+              })),
+            },
+          },
+          durationMs: Date.now() - new Date(startedAt).getTime(),
+          startedAt,
+          endedAt: new Date().toISOString(),
+          metadata: {},
+        };
+      }
+
+      const validatedInput = parsed.data;
+      const idempotencyKey = tool.idempotencyKey(validatedInput, context);
       context.logger.info(`Executing tool: ${name}`, { callId, idempotencyKey });
 
-      const result = await tool.execute(input, context);
+      const result = await tool.execute(validatedInput, context);
       result.startedAt = startedAt;
       result.endedAt = result.endedAt || new Date().toISOString();
 
@@ -151,7 +198,7 @@ export class DefaultToolRegistry implements ToolRegistry {
         };
       }
 
-      const message = err instanceof Error ? err.message : "Unknown tool execution error";
+      const message = err instanceof Error ? err.message : "未知工具执行错误";
       return {
         success: false,
         output: null,
@@ -168,6 +215,7 @@ export class DefaultToolRegistry implements ToolRegistry {
       };
     } finally {
       clearTimeout(timeoutId);
+      signal?.removeEventListener("abort", abortListener);
     }
   }
 }

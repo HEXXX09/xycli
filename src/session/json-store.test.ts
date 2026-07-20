@@ -1,5 +1,5 @@
 // ============================================================================
-// JSON Session Store Tests
+// JSON 会话存储测试
 // ============================================================================
 
 import { describe, it, expect, beforeEach } from "vitest";
@@ -9,15 +9,6 @@ import * as os from "node:os";
 import { v4 as uuidv4 } from "uuid";
 import { JsonSessionStore } from "./json-store.js";
 import type { Session } from "./types.js";
-
-async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "xycli-session-test-"));
-  try {
-    return await fn(dir);
-  } finally {
-    await fs.rm(dir, { recursive: true, force: true });
-  }
-}
 
 function makeSession(overrides: Partial<Session> = {}): Session {
   const now = new Date().toISOString();
@@ -83,7 +74,7 @@ describe("JsonSessionStore", () => {
     const s1 = makeSession({ title: "Session 1" });
     const s2 = makeSession({
       title: "Session 2",
-      updatedAt: new Date(Date.now() + 1000).toISOString(), // Definitely later
+      updatedAt: new Date(Date.now() + 1000).toISOString(), // 明确晚于第一个会话。
     });
 
     await store.create(s1);
@@ -91,7 +82,7 @@ describe("JsonSessionStore", () => {
 
     const list = await store.list();
     expect(list.length).toBe(2);
-    // Most recent first (s2 has later updatedAt)
+    // 更新时间较晚的 s2 应排在首位。
     expect(list[0].id).toBe(s2.id);
     expect(list[1].id).toBe(s1.id);
   });
@@ -141,13 +132,13 @@ describe("JsonSessionStore", () => {
     const session = makeSession();
     await store.create(session);
 
-    // Verify no .tmp files left behind
+    // 验证没有遗留临时文件。
     const dir = path.join(cwd, ".xycli", "sessions", "json");
     const files = await fs.readdir(dir);
     const tmpFiles = files.filter((f) => f.endsWith(".tmp"));
     expect(tmpFiles).toHaveLength(0);
 
-    // All files should be valid JSON
+    // 全部会话文件都必须是有效 JSON。
     const jsonFiles = files.filter((f) => f.endsWith(".json"));
     expect(jsonFiles.length).toBeGreaterThan(0);
     for (const f of jsonFiles) {

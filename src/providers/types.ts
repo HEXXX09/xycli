@@ -1,9 +1,9 @@
 // ============================================================================
-// Provider Types — exact interfaces from DESIGN.md §6
+// Provider 类型——对应 DESIGN.md 第 6 节
 // ============================================================================
 
 // ---------------------------------------------------------------------------
-// ProviderMessage
+// Provider 消息
 // ---------------------------------------------------------------------------
 
 export interface ProviderMessage {
@@ -17,7 +17,7 @@ export type ProviderContentBlock =
   | { type: "tool_result"; tool_use_id: string; content: string; is_error?: boolean };
 
 // ---------------------------------------------------------------------------
-// NormalizedToolCall
+// 统一格式的工具调用
 // ---------------------------------------------------------------------------
 
 export interface NormalizedToolCall {
@@ -27,7 +27,7 @@ export interface NormalizedToolCall {
 }
 
 // ---------------------------------------------------------------------------
-// TokenUsage
+// Token 用量
 // ---------------------------------------------------------------------------
 
 export interface TokenUsage {
@@ -38,7 +38,7 @@ export interface TokenUsage {
 }
 
 // ---------------------------------------------------------------------------
-// TokenEstimate
+// Token 估算结果
 // ---------------------------------------------------------------------------
 
 export interface TokenEstimate {
@@ -47,7 +47,7 @@ export interface TokenEstimate {
 }
 
 // ---------------------------------------------------------------------------
-// ProviderTokenInput
+// Token 估算输入
 // ---------------------------------------------------------------------------
 
 export interface ProviderTokenInput {
@@ -57,7 +57,7 @@ export interface ProviderTokenInput {
 }
 
 // ---------------------------------------------------------------------------
-// ProviderToolDefinition
+// Provider 工具定义
 // ---------------------------------------------------------------------------
 
 export interface ProviderToolDefinition {
@@ -67,7 +67,7 @@ export interface ProviderToolDefinition {
 }
 
 // ---------------------------------------------------------------------------
-// ProviderRequest
+// Provider 请求
 // ---------------------------------------------------------------------------
 
 export interface ProviderRequest {
@@ -79,10 +79,11 @@ export interface ProviderRequest {
   temperature: number;
   maxOutputTokens: number;
   metadata: Record<string, string>;
+  signal?: AbortSignal;
 }
 
 // ---------------------------------------------------------------------------
-// ProviderResponse
+// Provider 响应
 // ---------------------------------------------------------------------------
 
 export interface ProviderResponse {
@@ -93,7 +94,7 @@ export interface ProviderResponse {
 }
 
 // ---------------------------------------------------------------------------
-// ProviderStreamEvent
+// Provider 流式事件
 // ---------------------------------------------------------------------------
 
 export type ProviderStreamEvent =
@@ -104,7 +105,7 @@ export type ProviderStreamEvent =
   | { type: "done"; response: ProviderResponse };
 
 // ---------------------------------------------------------------------------
-// ProviderErrorPayload
+// Provider 错误结构
 // ---------------------------------------------------------------------------
 
 export interface ProviderErrorPayload {
@@ -115,7 +116,7 @@ export interface ProviderErrorPayload {
 }
 
 // ---------------------------------------------------------------------------
-// IProvider — exact from DESIGN.md §6
+// Provider 统一接口——对应 DESIGN.md 第 6 节
 // ---------------------------------------------------------------------------
 
 export interface IProvider {

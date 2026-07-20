@@ -1,17 +1,34 @@
 {
   "name": "xycli",
-  "version": "0.1.0",
-  "description": "A terminal-native AI coding agent",
+  "version": "0.2.0",
+  "description": "以 Rust 为核心运行时的终端 AI 编程助手",
   "type": "module",
   "bin": {
-    "xycli": "./dist/src/cli.js"
+    "xycli": "./dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=18"
   },
   "scripts": {
-    "build": "tsc",
-    "test": "vitest run",
+    "build": "node scripts/run-cargo.mjs build --workspace --release",
+    "build:rust": "node scripts/run-cargo.mjs build --workspace --release",
+    "prebuild:ts": "node scripts/clean-dist.mjs",
+    "build:ts": "tsc -p tsconfig.build.json",
+    "postbuild:ts": "node scripts/finalize-build.mjs",
+    "prepack": "npm run build:ts",
+    "test": "npm run test:rust && npm run test:ts",
+    "test:rust": "node scripts/run-cargo.mjs test --workspace --all-targets",
+    "test:ts": "vitest run",
     "test:watch": "vitest",
-    "dev": "tsx src/cli.ts",
-    "typecheck": "tsc --noEmit"
+    "dev": "node scripts/run-cargo.mjs run -p xycli --",
+    "dev:ts": "tsx src/cli.ts",
+    "check:rust": "node scripts/run-cargo.mjs check --workspace --all-targets",
+    "lint:rust": "node scripts/run-cargo.mjs fmt --all -- --check && node scripts/run-cargo.mjs clippy --workspace --all-targets -- -D warnings",
+    "typecheck": "npm run check:rust && npm run typecheck:ts",
+    "typecheck:ts": "tsc --noEmit"
   },
   "keywords": [
     "cli",
@@ -22,10 +39,8 @@
   "license": "MIT",
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
-    "chalk": "^5.4.1",
     "commander": "^13.1.0",
     "openai": "^6.48.0",
-    "ora": "^8.2.0",
     "uuid": "^11.1.0",
     "zod": "^3.24.2"
   },

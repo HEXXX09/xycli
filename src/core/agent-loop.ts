@@ -1,19 +1,19 @@
 // ============================================================================
-// Agent Loop — observe → plan → act → reflect cycle
+// Agent 循环——观察 → 规划 → 行动 → 反思
 // ============================================================================
 
 import { v4 as uuidv4 } from "uuid";
-import type { IProvider, ProviderMessage, ProviderToolDefinition, NormalizedToolCall } from "../providers/types.js";
+import type { IProvider, ProviderMessage, ProviderToolDefinition } from "../providers/types.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import type { SessionStore, Session, Message, ToolCallRecord } from "../session/types.js";
 import type { AgentLoopState, SessionStatus } from "./types.js";
 import { buildSystemPrompt } from "./prompts.js";
-import { ProviderError, ToolError } from "./errors.js";
+import { ProviderError, ValidationError, XycliError } from "./errors.js";
 import { PermissionGuard } from "./permission-guard.js";
 import type { PermissionMode } from "./permission-guard.js";
 
 // ---------------------------------------------------------------------------
-// Configuration
+// 运行配置
 // ---------------------------------------------------------------------------
 
 export interface AgentRunConfig {
@@ -26,6 +26,7 @@ export interface AgentRunConfig {
   sessionStore: SessionStore;
   permissionMode?: PermissionMode;
   signal?: AbortSignal;
+  sessionId?: string;
 }
 
 export interface AgentRunResult {
@@ -33,10 +34,11 @@ export interface AgentRunResult {
   status: SessionStatus;
   turns: number;
   finalMessage: string;
+  exitCode: 0 | 1 | 2 | 3 | 4 | 5;
 }
 
 // ---------------------------------------------------------------------------
-// runAgent — entry point for CLI
+// runAgent——CLI 调用入口
 // ---------------------------------------------------------------------------
 
 export async function runAgent(config: AgentRunConfig): Promise<AgentRunResult> {
@@ -50,44 +52,75 @@ export async function runAgent(config: AgentRunConfig): Promise<AgentRunResult> 
     sessionStore,
     permissionMode = "auto-safe",
     signal,
+    sessionId: requestedSessionId,
   } = config;
 
-  // Construct permission guard
+  if (!Number.isInteger(maxTurns) || maxTurns < 1 || maxTurns > 100) {
+    throw new ValidationError("maxTurns 必须是 1 到 100 之间的整数。");
+  }
+
+  // 构造本次运行使用的权限守卫。
   const permissionGuard = new PermissionGuard(permissionMode);
 
-  // Create session
-  const sessionId = uuidv4();
+  // 创建新会话或继续已有会话。
   const now = new Date().toISOString();
+  let session: Session;
+  let sessionId: string;
 
-  const session: Session = {
-    id: sessionId,
-    title: prompt.substring(0, 80),
-    cwd,
-    status: "running",
-    currentState: "IDLE",
-    plan: {},
-    providerName: provider.name,
-    model,
-    messages: [
-      {
-        id: uuidv4(),
-        role: "user",
-        content: prompt,
-        sequence: 0,
-        createdAt: now,
-      },
-    ],
-    toolCalls: [],
-    totalInputTokens: 0,
-    totalOutputTokens: 0,
-    createdAt: now,
-    updatedAt: now,
-    completedAt: null,
-  };
+  if (requestedSessionId) {
+    const existing = await sessionStore.get(requestedSessionId);
+    if (!existing) {
+      throw new ValidationError(`找不到要继续的会话: ${requestedSessionId}`);
+    }
+    if (existing.cwd !== cwd) {
+      throw new ValidationError("不能在不同工作目录中继续已有会话。");
+    }
+    session = existing;
+    sessionId = existing.id;
+    session.status = "running";
+    session.currentState = "PLANNING";
+    session.providerName = provider.name;
+    session.model = model;
+    session.completedAt = null;
+    session.messages.push({
+      id: uuidv4(),
+      role: "user",
+      content: prompt,
+      sequence: session.messages.length,
+      createdAt: now,
+    });
+    await sessionStore.update(session);
+  } else {
+    sessionId = uuidv4();
+    session = {
+      id: sessionId,
+      title: prompt.substring(0, 80),
+      cwd,
+      status: "running",
+      currentState: "IDLE",
+      plan: {},
+      providerName: provider.name,
+      model,
+      messages: [
+        {
+          id: uuidv4(),
+          role: "user",
+          content: prompt,
+          sequence: 0,
+          createdAt: now,
+        },
+      ],
+      toolCalls: [],
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      createdAt: now,
+      updatedAt: now,
+      completedAt: null,
+    };
+    await sessionStore.create(session);
+  }
 
-  await sessionStore.create(session);
-
-  // Build tool definitions for provider
+  // 构造发送给 Provider 的工具定义。
   const tools = toolRegistry.getAll();
   const providerTools: ProviderToolDefinition[] = tools.map((t) => ({
     name: t.name,
@@ -108,24 +141,26 @@ export async function runAgent(config: AgentRunConfig): Promise<AgentRunResult> 
   let finalMessage = "";
   let status: SessionStatus = "running";
   let currentState: AgentLoopState = "PLANNING";
+  let exitCode: AgentRunResult["exitCode"] = 0;
 
   try {
     while (turns < maxTurns && status === "running") {
-      // Check for abort signal
+      // 每轮开始前检查中断信号。
       if (signal?.aborted) {
         status = "interrupted";
         finalMessage = "Session interrupted by user.";
         currentState = "ERROR";
+        exitCode = 1;
         break;
       }
 
       turns++;
       currentState = turns === 1 ? "PLANNING" : "ACTING";
 
-      // Build messages for provider
+      // 根据会话历史构造 Provider 消息。
       const providerMessages: ProviderMessage[] = buildProviderMessages(session);
 
-      // Call provider
+      // 请求模型给出下一步响应。
       let response;
       try {
         response = await provider.chat({
@@ -137,17 +172,19 @@ export async function runAgent(config: AgentRunConfig): Promise<AgentRunResult> 
           temperature: 0.2,
           maxOutputTokens: 4096,
           metadata: {},
+          signal,
         });
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : "Provider error";
+        if (err instanceof ProviderError) throw err;
         throw new ProviderError(message, { retryable: false });
       }
 
-      // Update token counts
+      // 累加 Token 用量。
       session.totalInputTokens += response.usage.inputTokens;
       session.totalOutputTokens += response.usage.outputTokens;
 
-      // Record assistant message
+      // 记录助手消息。
       const assistantMsg: Message = {
         id: uuidv4(),
         role: "assistant",
@@ -158,18 +195,27 @@ export async function runAgent(config: AgentRunConfig): Promise<AgentRunResult> 
       };
       session.messages.push(assistantMsg);
 
-      // Handle finish reason
-      if (response.finishReason === "stop" || response.finishReason === "length") {
+      // 根据结束原因决定最终状态。
+      if (response.finishReason === "stop") {
         status = "completed";
         currentState = "COMPLETED";
         finalMessage = extractTextContent(response.message);
         break;
       }
 
+      if (response.finishReason === "length") {
+        status = "incomplete";
+        currentState = "INCOMPLETE";
+        exitCode = 1;
+        const partial = extractTextContent(response.message);
+        finalMessage = `${partial}${partial ? "\n\n" : ""}模型输出因长度限制被截断，任务尚未确认完成。`;
+        break;
+      }
+
       if (response.finishReason === "tool_calls" && response.toolCalls.length > 0) {
         currentState = "ACTING";
 
-        // Execute tool calls
+        // 按返回顺序执行工具调用。
         for (const toolCall of response.toolCalls) {
           if (signal?.aborted) {
             status = "interrupted";
@@ -179,7 +225,7 @@ export async function runAgent(config: AgentRunConfig): Promise<AgentRunResult> 
           const startedAt = new Date().toISOString();
 
           // -----------------------------------------------------------------
-          // Permission check (M1-T09)
+          // 权限级别检查（M1-T09）。
           // -----------------------------------------------------------------
           const tool = toolRegistry.get(toolCall.name);
 
@@ -223,33 +269,38 @@ export async function runAgent(config: AgentRunConfig): Promise<AgentRunResult> 
           }
 
           // -----------------------------------------------------------------
-          // Execute tool
+          // 执行已经通过权限检查的工具。
           // -----------------------------------------------------------------
           const toolResult = await toolRegistry.execute(
             toolCall.name,
             toolCall.input,
             sessionId,
             cwd,
-            signal
+            signal,
+            permissionMode
           );
 
           const endedAt = new Date().toISOString();
 
-          // Record tool call
+          // 记录工具调用及其审计结果。
           const record: ToolCallRecord = {
             id: toolCall.id,
             toolName: toolCall.name,
             input: toolCall.input,
             output: toolResult.output,
             error: toolResult.error?.message ?? null,
-            status: toolResult.success ? "succeeded" : "failed",
+            status: toolResult.success
+              ? "succeeded"
+              : ["UNSAFE_COMMAND", "PATH_OUTSIDE_WORKSPACE"].includes(toolResult.error?.code ?? "")
+                ? "denied"
+                : "failed",
             durationMs: toolResult.durationMs,
             startedAt,
             endedAt,
           };
           session.toolCalls.push(record);
 
-          // Add tool result message
+          // 将工具结果追加为模型可见消息。
           const toolResultContent = toolResult.success
             ? JSON.stringify(toolResult.output)
             : `Error: ${toolResult.error?.message ?? "Unknown error"}`;
@@ -274,22 +325,43 @@ export async function runAgent(config: AgentRunConfig): Promise<AgentRunResult> 
         continue; // Next loop iteration
       }
 
-      // Unknown finish reason — stop
-      status = "completed";
-      currentState = "COMPLETED";
-      finalMessage = extractTextContent(response.message);
+      // 未知或错误终止原因不能当作成功。
+      status = "error";
+      currentState = "ERROR";
+      exitCode = 4;
+      finalMessage = `Provider 以异常原因结束: ${response.finishReason}`;
       break;
     }
-  } catch (err: unknown) {
-    status = "error";
-    currentState = "ERROR";
-    finalMessage = err instanceof Error ? err.message : "Unknown error";
 
-    // Log error but don't crash
-    console.error(`\nError: ${finalMessage}`);
+    if (status === "running" && turns >= maxTurns) {
+      status = "incomplete";
+      currentState = "INCOMPLETE";
+      exitCode = 1;
+      finalMessage = `已达到最大轮次 ${maxTurns}，任务尚未确认完成。`;
+    } else if (status === "interrupted" && !finalMessage) {
+      finalMessage = "会话已被用户中断。";
+      exitCode = 1;
+      currentState = "ERROR";
+    }
+  } catch (err: unknown) {
+    if (signal?.aborted) {
+      status = "interrupted";
+      currentState = "ERROR";
+      finalMessage = "会话已被用户中断。";
+      exitCode = 1;
+    } else {
+      status = "error";
+      currentState = "ERROR";
+      finalMessage = err instanceof Error ? err.message : "未知错误";
+      exitCode = err instanceof XycliError ? err.exitCode : 1;
+    }
+
+    if (status === "error") {
+      console.error(`\n错误: ${finalMessage}`);
+    }
   }
 
-  // Update session with final state
+  // 持久化会话最终状态。
   session.status = status;
   session.currentState = currentState;
   session.completedAt = new Date().toISOString();
@@ -298,7 +370,7 @@ export async function runAgent(config: AgentRunConfig): Promise<AgentRunResult> 
   try {
     await sessionStore.update(session);
   } catch {
-    // Best effort
+    // 最终保存采用尽力而为策略，避免覆盖原始错误。
     console.error("Warning: Failed to save session state.");
   }
 
@@ -307,11 +379,12 @@ export async function runAgent(config: AgentRunConfig): Promise<AgentRunResult> 
     status,
     turns,
     finalMessage,
+    exitCode,
   };
 }
 
 // ---------------------------------------------------------------------------
-// Build provider messages from session history
+// 根据会话历史构造 Provider 消息
 // ---------------------------------------------------------------------------
 
 function buildProviderMessages(session: Session): ProviderMessage[] {
@@ -321,7 +394,7 @@ function buildProviderMessages(session: Session): ProviderMessage[] {
     if (msg.role === "system") continue; // System goes separately
 
     if (msg.role === "assistant" && msg.toolCalls && msg.toolCalls.length > 0) {
-      // Assistant message with tool calls
+      // 带工具调用的助手消息。
       const blocks: Array<{ type: "text"; text: string } | { type: "tool_use"; id: string; name: string; input: Record<string, unknown> }> = [];
 
       if (msg.content) {
@@ -337,7 +410,7 @@ function buildProviderMessages(session: Session): ProviderMessage[] {
       }
       messages.push({ role: "assistant", content: blocks });
     } else if (msg.role === "tool" && msg.toolCallId) {
-      // Tool result message
+      // 工具结果在 Provider 协议中作为用户侧结果块发送。
       messages.push({
         role: "user",
         content: [
@@ -349,7 +422,7 @@ function buildProviderMessages(session: Session): ProviderMessage[] {
         ],
       });
     } else {
-      // Simple text message
+      // 普通文本消息。
       messages.push({
         role: msg.role as ProviderMessage["role"],
         content: msg.content,
@@ -361,7 +434,7 @@ function buildProviderMessages(session: Session): ProviderMessage[] {
 }
 
 // ---------------------------------------------------------------------------
-// Extract text content from provider message
+// 从 Provider 消息中提取文本内容
 // ---------------------------------------------------------------------------
 
 function extractTextContent(message: ProviderMessage): string {

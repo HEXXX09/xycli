@@ -1,13 +1,11 @@
 // ============================================================================
-// M1 E2E Test — full CLI flow with mock provider
+// M1 集成测试——使用模拟 Provider 验证完整 Agent 流程
 // ============================================================================
 
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect } from "vitest";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as os from "node:os";
-import { spawn } from "node:child_process";
-import { v4 as uuidv4 } from "uuid";
 import { runAgent } from "../../src/core/agent-loop.js";
 import { MockAnthropicProvider, makeTextResponse, makeToolCallResponse } from "../fixtures/mock-anthropic.js";
 import { DefaultToolRegistry } from "../../src/tools/registry.js";
@@ -27,11 +25,11 @@ describe("M1 E2E", () => {
   describe("Full agent loop with mock provider", () => {
     it("completes a 'list files' task using terminal_exec", async () => {
       await withTempDir(async (dir) => {
-        // Create some test files
+        // 准备测试文件。
         await fs.writeFile(path.join(dir, "README.md"), "# Test Project");
         await fs.writeFile(path.join(dir, "package.json"), "{}");
 
-        // Mock provider: first response calls terminal_exec, second is final text
+        // 第一次响应调用 terminal_exec，第二次响应返回最终文本。
         const provider = new MockAnthropicProvider([
           makeToolCallResponse("terminal_exec", {
             command: "ls",
@@ -56,11 +54,11 @@ describe("M1 E2E", () => {
           sessionStore,
         });
 
-        // Verify agent completed
+        // 验证 Agent 正常完成。
         expect(result.status).toBe("completed");
         expect(result.turns).toBe(2);
 
-        // Verify session was saved
+        // 验证会话已经保存。
         const session = await sessionStore.get(result.sessionId);
         expect(session).not.toBeNull();
         expect(session!.title).toContain("list files");
@@ -71,13 +69,13 @@ describe("M1 E2E", () => {
         expect(session!.toolCalls[0].status).toBe("succeeded");
         expect(session!.toolCalls[0].output).toBeDefined();
 
-        // Verify the ls output contains our files
+        // 验证 ls 输出包含测试文件。
         const output = session!.toolCalls[0].output as { stdout: string };
         expect(output.stdout).toBeDefined();
         expect(output.stdout).toContain("README.md");
         expect(output.stdout).toContain("package.json");
 
-        // Verify session file exists on disk
+        // 验证会话文件已经写入磁盘。
         const sessionFile = path.join(dir, ".xycli", "sessions", "json", `${result.sessionId}.json`);
         const exists = await fs.stat(sessionFile).then(() => true).catch(() => false);
         expect(exists).toBe(true);
@@ -129,7 +127,7 @@ describe("M1 E2E", () => {
         expect(session!.toolCalls[1].toolName).toBe("file_write");
         expect(session!.toolCalls[1].status).toBe("succeeded");
 
-        // Verify file was actually updated
+        // 验证文件内容确实已更新。
         const updatedContent = await fs.readFile(testFile, "utf-8");
         const updated = JSON.parse(updatedContent);
         expect(updated.version).toBe("2.0");
@@ -139,9 +137,9 @@ describe("M1 E2E", () => {
     it("preserves session state across multiple turns", async () => {
       await withTempDir(async (dir) => {
         const provider = new MockAnthropicProvider([
-          makeToolCallResponse("terminal_exec", { command: "echo step1" }),
-          makeToolCallResponse("terminal_exec", { command: "echo step2" }),
-          makeToolCallResponse("terminal_exec", { command: "echo step3" }),
+          makeToolCallResponse("terminal_exec", { command: "echo", args: ["step1"] }),
+          makeToolCallResponse("terminal_exec", { command: "echo", args: ["step2"] }),
+          makeToolCallResponse("terminal_exec", { command: "echo", args: ["step3"] }),
           makeTextResponse("All steps completed."),
         ]);
 
@@ -162,12 +160,12 @@ describe("M1 E2E", () => {
         expect(result.status).toBe("completed");
         expect(result.turns).toBe(4);
 
-        // Verify the session has accumulated all messages and tool calls
+        // 验证会话累计了全部消息和工具调用。
         const session = await sessionStore.get(result.sessionId);
         expect(session!.toolCalls).toHaveLength(3);
         expect(session!.messages.length).toBe(8); // user + 3*(assistant+tool_result) + final_assistant
 
-        // All tool calls should be succeeded
+        // 全部工具调用都应成功。
         for (const tc of session!.toolCalls) {
           expect(tc.status).toBe("succeeded");
         }

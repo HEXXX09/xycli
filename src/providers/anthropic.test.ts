@@ -1,18 +1,19 @@
 // ============================================================================
-// Anthropic Provider Tests
+// Anthropic Provider 测试
 // ============================================================================
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
+import Anthropic from "@anthropic-ai/sdk";
 import { AnthropicProvider } from "./anthropic.js";
 import type { ProviderRequest } from "./types.js";
 
-// Skip real API tests unless ANTHROPIC_API_KEY is set
+// 只有显式设置 ANTHROPIC_API_KEY 时才运行真实 API 测试。
 const hasApiKey = !!process.env.ANTHROPIC_API_KEY;
 
 describe("AnthropicProvider", () => {
   describe("constructor", () => {
     it("throws ProviderError when no API key is available", () => {
-      // Temporarily clear the env var
+      // 临时清除环境变量。
       const saved = process.env.ANTHROPIC_API_KEY;
       delete process.env.ANTHROPIC_API_KEY;
       try {
@@ -79,7 +80,7 @@ describe("AnthropicProvider", () => {
       expect(response.usage.inputTokens).toBeGreaterThan(0);
       expect(response.usage.outputTokens).toBeGreaterThan(0);
 
-      // Check message content
+      // 验证消息文本。
       if (typeof response.message.content === "string") {
         expect(response.message.content.toLowerCase()).toContain("hello");
       } else {
@@ -127,6 +128,94 @@ describe("AnthropicProvider", () => {
       expect(response.toolCalls[0].name).toBe("greet");
       expect(response.toolCalls[0].input).toHaveProperty("name");
     }, 30_000);
+  });
+
+  describe("chat（模拟客户端）", () => {
+    it("映射文本、用量并向 SDK 传递中断信号", async () => {
+      const signal = new AbortController().signal;
+      const create = vi.fn(async (_body: unknown, _options?: unknown) => ({
+        id: "msg_test",
+        type: "message" as const,
+        role: "assistant" as const,
+        model: "test-model",
+        content: [{ type: "text" as const, text: "完成" }],
+        stop_reason: "end_turn" as const,
+        stop_sequence: null,
+        usage: { input_tokens: 10, output_tokens: 2 },
+      }));
+      const client = { messages: { create } } as unknown as Anthropic;
+      const provider = new AnthropicProvider("test-key", client);
+
+      const response = await provider.chat({
+        sessionId: "session",
+        model: "test-model",
+        messages: [{ role: "user", content: "测试" }],
+        tools: [],
+        system: "系统提示",
+        temperature: 0,
+        maxOutputTokens: 100,
+        metadata: {},
+        signal,
+      });
+
+      expect(response.finishReason).toBe("stop");
+      expect(response.usage.inputTokens).toBe(10);
+      expect(create.mock.calls[0][1]).toEqual({ signal });
+    });
+  });
+
+  describe("streamChat（模拟客户端）", () => {
+    it("使用 finalMessage 获取完整文本和工具参数", async () => {
+      const finalMessage = {
+        id: "msg_stream",
+        type: "message" as const,
+        role: "assistant" as const,
+        model: "test-model",
+        content: [{
+          type: "tool_use" as const,
+          id: "call_1",
+          name: "file_read",
+          input: { path: "README.md" },
+        }],
+        stop_reason: "tool_use" as const,
+        stop_sequence: null,
+        usage: { input_tokens: 12, output_tokens: 4 },
+      };
+      const streamObject = {
+        async *[Symbol.asyncIterator]() {
+          yield {
+            type: "message_delta" as const,
+            delta: { stop_reason: "tool_use" as const, stop_sequence: null },
+            usage: { output_tokens: 4 },
+          };
+        },
+        finalMessage: vi.fn(async () => finalMessage),
+      };
+      const stream = vi.fn((_body: unknown, _options?: unknown) => streamObject);
+      const client = { messages: { stream } } as unknown as Anthropic;
+      const provider = new AnthropicProvider("test-key", client);
+
+      let response;
+      for await (const event of provider.streamChat({
+        sessionId: "session",
+        model: "test-model",
+        messages: [{ role: "user", content: "读取" }],
+        tools: [],
+        system: "",
+        temperature: 0,
+        maxOutputTokens: 100,
+        metadata: {},
+      })) {
+        if (event.type === "done") response = event.response;
+      }
+
+      expect(streamObject.finalMessage).toHaveBeenCalledOnce();
+      expect(response?.toolCalls[0]).toEqual({
+        id: "call_1",
+        name: "file_read",
+        input: { path: "README.md" },
+      });
+    });
   });
 
   describe("streamChat (real API)", () => {

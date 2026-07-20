@@ -1,129 +1,157 @@
 # XYCLI
 
-终端原生的 AI 编程助手 —— 像 Claude Code 一样在命令行里写代码，但开放、可扩展。
-
-直接用自然语言在终端里完成编码、调试、重构、测试和部署。
-
-## 主流 AI Agent CLI 工具对比
-
-| 工具 | 语言 | 分发方式 |
-|------|------|----------|
-| **Claude Code** (Anthropic) | TypeScript | npm |
-| **Codex CLI** (OpenAI) | TypeScript | npm |
-| **Hermes Agent** (Nous) | Python | pip / CLI |
-| **Aider** | Python | pip |
-| **Goose** (Block) | Rust | 二进制 |
-| **XYCLI** | TypeScript | npm ✅ |
-
-TypeScript 是 AI CLI Agent 的主流选择：npm 生态成熟、跨平台终端支持好、流式处理强。XYCLI 与 Claude Code 技术栈一致。
+XYCLI 是一个以 Rust 为核心运行时的终端 AI 编程助手。它将自然语言任务交给模型，通过受控的文件和终端工具完成读取、修改、验证，并将完整过程保存为本地会话。
 
 ## 当前状态
 
-**M1 骨架** — 核心 agent loop、Anthropic provider、3 个内置工具。CLI 可运行，44 个测试通过。
+项目已进入 Rust 核心迁移后的 `v0.2.0` 基线：
 
-| 里程碑 | 目标 | 状态 |
-|--------|------|------|
-| M1 | 核心骨架（agent loop + Anthropic + 文件/终端工具） | ✅ 已完成 |
-| M2 | 更多工具 + 流式输出 UI | 🔜 下一步 |
-| M3 | 多 provider 支持（OpenAI） | 计划中 |
-| M4 | SQLite 持久化 + 会话恢复 | 计划中 |
-| M5 | Plan 模式（先计划后执行） | 计划中 |
-| M6 | 跨会话记忆 | 计划中 |
-| M7 | Computer Use（终端增强 + 浏览器 + 截图） | 计划中 |
-| M8 | MCP 协议 + 插件系统 | 计划中 |
-| M9 | 安全（权限引擎、审批、脱敏、撤销） | 计划中 |
-| M10 | 打磨（遥测、诊断、npm 发布、CI/CD） | 计划中 |
+- Rust CLI 与可复用核心库；
+- Anthropic Messages API 与 DeepSeek Chat Completions API；
+- 可继续上下文的 Agent 工具调用循环；
+- `file_read`、`file_write`、`terminal_exec` 三个内置工具；
+- `read-only`、`auto-safe`、`full-access` 三种权限模式；
+- 工作区路径隔离、符号链接逃逸防御和无 shell 命令执行；
+- JSON 会话原子持久化；
+- Rust 单元、协议、集成与安全测试；
+- TypeScript 版本保留为迁移对照和兼容实现。
 
-## 快速开始
+Rust 是默认开发和运行路径。原 TypeScript 代码位于 `src/`，不会参与 Rust 二进制运行。
 
-### 环境要求
+## 环境要求
 
-- Node.js >= 18
-- Anthropic API Key
+- Rust stable，项目通过 `rust-toolchain.toml` 固定工具链通道；
+- 可选：Node.js 18 或更高版本，仅用于运行旧 TypeScript 回归测试；
+- `ANTHROPIC_API_KEY` 或 `DEEPSEEK_API_KEY`。
 
-### 安装运行
+安装 Rust：
 
 ```bash
-# 安装依赖
-npm install
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+rustup component add rustfmt clippy
+```
 
-# 编译
-npm run build
+## 本地构建与运行
 
-# 设置 API Key
+```bash
+cargo build --workspace
+```
+
+默认使用 Anthropic：
+
+```bash
 export ANTHROPIC_API_KEY=sk-ant-...
-
-# 运行 XYCLI
-node dist/src/cli.js "列出当前目录的文件"
+cargo run -p xycli -- "列出当前目录的文件"
 ```
 
-### 开发命令
+使用 DeepSeek：
 
 ```bash
-npm run dev          # 热加载运行（tsx，无需编译）
-npm test             # 运行全部测试（44 个用例）
-npm run typecheck    # 类型检查
-npm run build        # TypeScript 编译
+export DEEPSEEK_API_KEY=sk-...
+cargo run -p xycli -- --provider deepseek "读取 README.md 并总结"
 ```
+
+构建发布版本并直接运行：
+
+```bash
+cargo build --workspace --release
+./target/release/xycli --help
+./target/release/xycli "检查当前项目"
+```
+
+不提供 prompt 时进入交互模式：
+
+```bash
+cargo run -p xycli --
+```
+
+也支持管道输入：
+
+```bash
+printf '总结 README.md' | cargo run -p xycli -- --provider deepseek
+```
+
+## 常用参数
+
+```text
+--provider <provider>   anthropic 或 deepseek
+--model <model>         覆盖 Provider 默认模型
+--max-turns <1-100>     单次任务最大 Agent 循环次数
+--permission <mode>     read-only、auto-safe 或 full-access
+--session <uuid>        继续已有会话
+-i, --interactive       强制进入交互模式
+```
+
+交互命令包括 `/help`、`/new`、`/model <name>`、`/turns <n>` 和 `/exit`。
+
+## 权限说明
+
+默认使用 `auto-safe`：
+
+- 文件读写仅允许在启动工作区内；
+- 真实路径校验会阻止绝对路径、`..` 和符号链接逃逸；
+- `terminal_exec` 始终以“可执行文件 + 参数数组”运行，不经过 shell；
+- 仅允许 `pwd`、`echo`、工作区内 `ls` 和受限的只读 Git 子命令；
+- 任意其他可执行文件需要显式使用 `--permission full-access`。
+
+`full-access` 仍然不会启用 shell 字符串拼接，但允许模型调用 PATH 中的任意程序。只应在任务和仓库可信时启用。
+
+## 测试与质量检查
+
+Rust 全量验证：
+
+```bash
+cargo test --workspace --all-targets
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo build --workspace --release
+```
+
+一次运行 Rust 与 TypeScript 回归：
+
+```bash
+npm ci
+npm test
+npm run typecheck
+```
+
+真实模型 API 不属于默认自动化测试；Provider 协议测试使用本机临时 HTTP 服务，不会消耗 API 额度。
 
 ## 架构
 
-```
-xycli "用自然语言描述任务"
-    │
-    ▼
-CLI 入口 (Commander.js)
-    │
-    ▼
-Agent Loop ── 观察 → 规划 → 执行 → 反思
-    │              │
-    ▼              ▼
-Anthropic API    工具注册中心
-                     │
-          ┌──────────┼──────────┐
-          ▼          ▼          ▼
-      文件读取    文件写入    终端执行
-          │
-          ▼
-    会话存储 (JSON)
+```text
+crates/xycli-cli
+  └── 参数、交互模式、Ctrl+C 与进程退出码
+        ↓
+crates/xycli-core
+  ├── Agent Loop
+  ├── Provider：Anthropic / DeepSeek
+  ├── PermissionMode + ToolRegistry
+  ├── file_read / file_write / terminal_exec
+  └── JsonSessionStore
 ```
 
-- **工具接口** — 实现 `ITool` 接口并注册即可添加新工具，无需修改核心代码。
-- **Provider 接口** — 实现 `IProvider` 接口即可接入新模型。M1 内置 Anthropic，M3 加入 OpenAI。
-- **Agent Loop** — 可恢复的观察-规划-执行-反思循环，支持最大轮次控制和 Ctrl+C 中断。
+详细资料：
 
-## M1 内置工具
-
-| 工具 | 权限级别 | 功能 |
-|------|---------|------|
-| `file_read` | 只读 | 读取文件，支持行范围、大小限制、SHA256 校验 |
-| `file_write` | 写文件 | 原子写入，附带 unified diff 和哈希验证 |
-| `terminal_exec` | 安全命令 | 执行 shell 命令，捕获 stdout/stderr，支持超时 |
+- [Rust 迁移设计与验收](docs/RUST_MIGRATION.md)
+- [系统架构](docs/ARCHITECTURE.md)
+- [产品需求](docs/PRD.md)
+- [详细设计](docs/DESIGN.md)
+- [任务路线图](docs/TASKS.md)
+- [稳定化修复设计](docs/REMEDIATION_PLAN.md)
 
 ## 项目结构
 
-```
-XYCLI/
-├── docs/                    # 设计文档
-│   ├── PRD.md              # 产品需求（18 功能需求，10 用户故事）
-│   ├── ARCHITECTURE.md     # 系统架构（314 行）
-│   ├── DESIGN.md           # 详细设计（1018 行，含完整 DDL/接口定义）
-│   └── TASKS.md            # 任务拆解（10 里程碑，61 任务）
-├── src/
-│   ├── cli.ts              # CLI 入口（Commander.js）
-│   ├── version.ts
-│   ├── core/               # Agent Loop、类型定义、System Prompt、错误处理
-│   ├── providers/          # Anthropic 适配器（IProvider 接口）
-│   ├── tools/              # 工具注册中心 + 3 个内置工具（ITool 接口）
-│   └── session/            # JSON 文件会话存储
-├── test/
-│   ├── e2e/                # 端到端测试
-│   └── fixtures/           # Mock Provider
-├── README.md
-├── package.json
-└── tsconfig.json
+```text
+Cargo.toml
+crates/
+├── xycli-cli/          # Rust 可执行程序
+└── xycli-core/         # Rust 核心库和集成测试
+src/                    # TypeScript 兼容实现
+test/                   # TypeScript E2E 与 fixture
+docs/                   # 中文设计文档
 ```
 
-## License
+## 许可证
 
 MIT

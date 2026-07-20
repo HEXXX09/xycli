@@ -1,5 +1,5 @@
 // ============================================================================
-// Tool Registry + Built-in Tools Tests
+// 工具注册中心与内置工具测试
 // ============================================================================
 
 import { describe, it, expect, beforeEach } from "vitest";
@@ -15,14 +15,8 @@ import type { ToolRegistry } from "./registry.js";
 import type { ITool } from "./types.js";
 
 // ---------------------------------------------------------------------------
-// Helpers
+// 测试辅助方法
 // ---------------------------------------------------------------------------
-
-function setupRegistry(): ToolRegistry {
-  const registry = new DefaultToolRegistry();
-  registerBuiltins(registry);
-  return registry;
-}
 
 async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "xycli-test-"));
@@ -34,7 +28,7 @@ async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
 }
 
 // ---------------------------------------------------------------------------
-// Registry Tests
+// 工具注册中心测试
 // ---------------------------------------------------------------------------
 
 describe("DefaultToolRegistry", () => {
@@ -53,7 +47,7 @@ describe("DefaultToolRegistry", () => {
   it("throws when registering duplicate tool name", () => {
     registry.register(new FileReadTool());
     expect(() => registry.register(new FileReadTool())).toThrow(
-      /already registered/
+      /已经注册/
     );
   });
 
@@ -89,10 +83,39 @@ describe("DefaultToolRegistry", () => {
     expect(result.success).toBe(false);
     expect(result.error?.code).toBe("TOOL_NOT_FOUND");
   });
+
+  it("rejects invalid tool input before execution", async () => {
+    registry.register(new FileReadTool());
+    const result = await registry.execute(
+      "file_read",
+      { path: 123 } as unknown as object,
+      "session-1",
+      process.cwd()
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe("INVALID_TOOL_INPUT");
+    expect(result.error?.details.issues).toBeDefined();
+  });
+
+  it("直接调用注册中心时仍强制执行权限模式", async () => {
+    registry.register(new FileWriteTool());
+    const result = await registry.execute(
+      "file_write",
+      { path: "blocked.txt", content: "blocked" },
+      "session-1",
+      process.cwd(),
+      undefined,
+      "read-only"
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe("PERMISSION_DENIED");
+  });
 });
 
 // ---------------------------------------------------------------------------
-// FileReadTool Tests
+// FileReadTool 测试
 // ---------------------------------------------------------------------------
 
 describe("FileReadTool", () => {
@@ -195,10 +218,60 @@ describe("FileReadTool", () => {
       expect(result.error?.code).toBe("NOT_A_FILE");
     });
   });
+
+  it("rejects paths outside the workspace", async () => {
+    await withTempDir(async (dir) => {
+      const outsideDir = await fs.mkdtemp(path.join(os.tmpdir(), "xycli-outside-"));
+      try {
+        const outsideFile = path.join(outsideDir, "secret.txt");
+        await fs.writeFile(outsideFile, "secret");
+        const registry = new DefaultToolRegistry();
+        registry.register(new FileReadTool());
+
+        const result = await registry.execute(
+          "file_read",
+          { path: outsideFile },
+          "session-1",
+          dir
+        );
+
+        expect(result.success).toBe(false);
+        expect(result.error?.code).toBe("PATH_OUTSIDE_WORKSPACE");
+      } finally {
+        await fs.rm(outsideDir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  it("rejects symlinks that escape the workspace", async () => {
+    await withTempDir(async (dir) => {
+      const outsideDir = await fs.mkdtemp(path.join(os.tmpdir(), "xycli-link-outside-"));
+      try {
+        const outsideFile = path.join(outsideDir, "secret.txt");
+        const linkPath = path.join(dir, "secret-link.txt");
+        await fs.writeFile(outsideFile, "secret");
+        await fs.symlink(outsideFile, linkPath);
+        const registry = new DefaultToolRegistry();
+        registry.register(new FileReadTool());
+
+        const result = await registry.execute(
+          "file_read",
+          { path: "secret-link.txt" },
+          "session-1",
+          dir
+        );
+
+        expect(result.success).toBe(false);
+        expect(result.error?.code).toBe("PATH_OUTSIDE_WORKSPACE");
+      } finally {
+        await fs.rm(outsideDir, { recursive: true, force: true });
+      }
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
-// FileWriteTool Tests
+// FileWriteTool 测试
 // ---------------------------------------------------------------------------
 
 describe("FileWriteTool", () => {
@@ -227,7 +300,7 @@ describe("FileWriteTool", () => {
       expect(result.output?.postImageSha256).toBeDefined();
       expect(result.output?.unifiedDiff).toContain("+hello world");
 
-      // Verify file was actually written
+      // 验证文件已经实际写入。
       const content = await fs.readFile(filePath, "utf-8");
       expect(content).toBe("hello world");
     });
@@ -319,10 +392,26 @@ describe("FileWriteTool", () => {
       expect(result.error?.code).toBe("HASH_MISMATCH");
     });
   });
+
+  it("rejects writes outside the workspace", async () => {
+    await withTempDir(async (dir) => {
+      const registry = new DefaultToolRegistry();
+      registry.register(new FileWriteTool());
+      const result = await registry.execute(
+        "file_write",
+        { path: "../escaped.txt", content: "blocked", createIfMissing: true },
+        "session-1",
+        dir
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error?.code).toBe("PATH_OUTSIDE_WORKSPACE");
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
-// TerminalExecTool Tests
+// TerminalExecTool 测试
 // ---------------------------------------------------------------------------
 
 describe("TerminalExecTool", () => {
@@ -350,14 +439,14 @@ describe("TerminalExecTool", () => {
   it("reports non-zero exit codes", async () => {
     const tool = new TerminalExecTool();
     const result = await tool.execute(
-      { command: "exit 1" },
+      { command: "sh", args: ["-c", "exit 1"] },
       {
         sessionId: "test",
         callId: "1",
         cwd: process.cwd(),
         env: process.env as Record<string, string>,
         signal: new AbortController().signal,
-        permissions: {} as any,
+          permissions: { mode: "full-access" } as any,
         logger: { info() {}, warn() {}, error() {} },
         startedAt: new Date().toISOString(),
       }
@@ -402,13 +491,88 @@ describe("TerminalExecTool", () => {
       }
     );
 
-    // Non-zero exit on non-existent command
+    // 不存在的命令不应返回成功退出码。
     expect(result.output?.exitCode).not.toBe(0);
+  });
+
+  it("rejects shell command strings instead of interpreting them", async () => {
+    const registry = new DefaultToolRegistry();
+    registry.register(new TerminalExecTool());
+    const result = await registry.execute(
+      "terminal_exec",
+      { command: "echo injected" },
+      "session-1",
+      process.cwd(),
+      undefined,
+      "full-access"
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe("INVALID_TOOL_INPUT");
+  });
+
+  it("blocks commands outside the auto-safe allowlist", async () => {
+    const registry = new DefaultToolRegistry();
+    registry.register(new TerminalExecTool());
+    const result = await registry.execute(
+      "terminal_exec",
+      { command: "sh", args: ["-c", "echo unsafe"] },
+      "session-1",
+      process.cwd(),
+      undefined,
+      "auto-safe"
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error?.code).toBe("UNSAFE_COMMAND");
+  });
+
+  it("allows an explicit executable and args in full-access mode", async () => {
+    const registry = new DefaultToolRegistry();
+    registry.register(new TerminalExecTool());
+    const result = await registry.execute(
+      "terminal_exec",
+      { command: "echo", args: ["hello", "world"] },
+      "session-1",
+      process.cwd(),
+      undefined,
+      "full-access"
+    );
+
+    expect(result.success).toBe(true);
+    expect((result.output as { stdout: string }).stdout).toContain("hello world");
+  });
+
+  it("auto-safe 不会执行工作区 PATH 中伪装成白名单命令的程序", async () => {
+    await withTempDir(async (dir) => {
+      const fakeLs = path.join(dir, "ls");
+      const marker = path.join(dir, "executed.txt");
+      await fs.writeFile(fakeLs, `#!/bin/sh\ntouch "${marker}"\n`);
+      await fs.chmod(fakeLs, 0o755);
+      const tool = new TerminalExecTool();
+
+      const result = await tool.execute(
+        { command: "ls" },
+        {
+          sessionId: "test",
+          callId: "1",
+          cwd: dir,
+          env: { ...process.env, PATH: `${dir}${path.delimiter}${process.env.PATH ?? ""}` } as Record<string, string>,
+          signal: new AbortController().signal,
+          permissions: { mode: "auto-safe" } as any,
+          logger: { info() {}, warn() {}, error() {} },
+          startedAt: new Date().toISOString(),
+        }
+      );
+
+      expect(result.success).toBe(true);
+      await expect(fs.stat(marker)).rejects.toThrow();
+    });
   });
 });
 
 // ---------------------------------------------------------------------------
-// Builtins Registration Tests
+// 内置工具注册测试
 // ---------------------------------------------------------------------------
 
 describe("registerBuiltins", () => {

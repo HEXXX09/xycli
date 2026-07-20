@@ -1,9 +1,8 @@
 // ============================================================================
-// Agent Loop Tests
+// Agent 循环测试
 // ============================================================================
 
-import { describe, it, expect, beforeEach } from "vitest";
-import { v4 as uuidv4 } from "uuid";
+import { describe, it, expect } from "vitest";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as os from "node:os";
@@ -13,7 +12,6 @@ import { MockAnthropicProvider, makeTextResponse, makeToolCallResponse, makeText
 import { DefaultToolRegistry } from "../tools/registry.js";
 import { registerBuiltins } from "../tools/builtins.js";
 import { JsonSessionStore } from "../session/json-store.js";
-import type { SessionStore } from "../session/types.js";
 
 async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "xycli-agent-test-"));
@@ -79,7 +77,7 @@ describe("AgentLoop", () => {
           sessionStore,
         });
 
-        // Verify session was saved
+        // 验证会话已经保存。
         const session = await sessionStore.get(result.sessionId);
         expect(session).not.toBeNull();
         expect(session?.messages.length).toBeGreaterThanOrEqual(2); // user + assistant
@@ -91,7 +89,7 @@ describe("AgentLoop", () => {
   describe("tool call loop", () => {
     it("executes tool calls and continues", async () => {
       await withTempDir(async (dir) => {
-        // Write a test file first
+        // 预先写入测试文件。
         await fs.mkdir(dir, { recursive: true });
         const testFile = path.join(dir, "test.txt");
         await fs.writeFile(testFile, "content of the file");
@@ -117,7 +115,7 @@ describe("AgentLoop", () => {
         expect(result.status).toBe("completed");
         expect(result.turns).toBe(2);
 
-        // Verify session has tool calls
+        // 验证会话包含工具调用。
         const session = await sessionStore.get(result.sessionId);
         expect(session?.toolCalls.length).toBeGreaterThan(0);
         expect(session?.toolCalls[0].toolName).toBe("file_read");
@@ -193,10 +191,10 @@ describe("AgentLoop", () => {
   describe("max turns", () => {
     it("stops after reaching max turns", async () => {
       await withTempDir(async (dir) => {
-        // Provider always returns tool calls, so it will loop until max turns
+        // Provider 持续返回工具调用，使循环达到最大轮次。
         const provider = new MockAnthropicProvider(
           Array.from({ length: 10 }, () =>
-            makeToolCallResponse("terminal_exec", { command: "echo hi" })
+            makeToolCallResponse("terminal_exec", { command: "echo", args: ["hi"] })
           )
         );
         const toolRegistry = new DefaultToolRegistry();
@@ -214,6 +212,28 @@ describe("AgentLoop", () => {
         });
 
         expect(result.turns).toBe(3);
+        expect(result.status).toBe("incomplete");
+        expect(result.exitCode).toBe(1);
+        expect(result.finalMessage).toContain("最大轮次");
+
+        const session = await sessionStore.get(result.sessionId);
+        expect(session?.status).toBe("incomplete");
+        expect(session?.currentState).toBe("INCOMPLETE");
+      });
+    });
+
+    it("模型输出达到长度限制时标记为未完成", async () => {
+      await withTempDir(async (dir) => {
+        const response = makeTextResponse("部分响应");
+        response.finishReason = "length";
+        const config = setupConfig({ cwd: dir, responses: [response] });
+
+        const result = await runAgent(config);
+
+        expect(result.status).toBe("incomplete");
+        expect(result.exitCode).toBe(1);
+        expect(result.finalMessage).toContain("部分响应");
+        expect(result.finalMessage).toContain("截断");
       });
     });
   });
@@ -239,7 +259,7 @@ describe("AgentLoop", () => {
           sessionStore,
         });
 
-        // Should continue after failed tool call
+        // 工具失败后 Agent 仍应继续生成最终响应。
         expect(result.status).toBe("completed");
 
         const session = await sessionStore.get(result.sessionId);
@@ -299,6 +319,102 @@ describe("AgentLoop", () => {
         });
 
         expect(result.status).toBe("interrupted");
+        expect(result.exitCode).toBe(1);
+      });
+    });
+
+    it("将 AbortSignal 传递给 Provider 请求", async () => {
+      await withTempDir(async (dir) => {
+        const abortController = new AbortController();
+        let receivedSignal: AbortSignal | undefined;
+        const provider = new MockAnthropicProvider([makeTextResponse("完成")]);
+        provider.onRequest = (request) => {
+          receivedSignal = request.signal;
+        };
+        const toolRegistry = new DefaultToolRegistry();
+        registerBuiltins(toolRegistry);
+
+        await runAgent({
+          prompt: "测试信号",
+          model: "test-model",
+          maxTurns: 2,
+          cwd: dir,
+          provider,
+          toolRegistry,
+          sessionStore: new JsonSessionStore(dir),
+          signal: abortController.signal,
+        });
+
+        expect(receivedSignal).toBe(abortController.signal);
+      });
+    });
+
+    it("Provider 请求期间中断时返回 interrupted", async () => {
+      await withTempDir(async (dir) => {
+        const abortController = new AbortController();
+        const provider = new MockAnthropicProvider([makeTextResponse("不会返回")]);
+        provider.onRequest = (request) => {
+          abortController.abort();
+          request.signal?.throwIfAborted();
+        };
+        const toolRegistry = new DefaultToolRegistry();
+        registerBuiltins(toolRegistry);
+
+        const result = await runAgent({
+          prompt: "中断请求",
+          model: "test-model",
+          maxTurns: 2,
+          cwd: dir,
+          provider,
+          toolRegistry,
+          sessionStore: new JsonSessionStore(dir),
+          signal: abortController.signal,
+        });
+
+        expect(result.status).toBe("interrupted");
+        expect(result.exitCode).toBe(1);
+      });
+    });
+  });
+
+  describe("会话恢复", () => {
+    it("在已有会话中追加用户消息并保留上下文", async () => {
+      await withTempDir(async (dir) => {
+        const provider = new MockAnthropicProvider([
+          makeTextResponse("第一轮完成"),
+          makeTextResponse("第二轮完成"),
+        ]);
+        const toolRegistry = new DefaultToolRegistry();
+        registerBuiltins(toolRegistry);
+        const sessionStore = new JsonSessionStore(dir);
+
+        const first = await runAgent({
+          prompt: "第一条消息",
+          model: "test-model",
+          maxTurns: 2,
+          cwd: dir,
+          provider,
+          toolRegistry,
+          sessionStore,
+        });
+        const second = await runAgent({
+          prompt: "第二条消息",
+          model: "test-model",
+          maxTurns: 2,
+          cwd: dir,
+          provider,
+          toolRegistry,
+          sessionStore,
+          sessionId: first.sessionId,
+        });
+
+        expect(second.sessionId).toBe(first.sessionId);
+        const session = await sessionStore.get(first.sessionId);
+        expect(session?.messages.filter((message) => message.role === "user"))
+          .toHaveLength(2);
+        expect(provider.requests[1].messages.some((message) =>
+          typeof message.content === "string" && message.content === "第一条消息"
+        )).toBe(true);
       });
     });
   });

@@ -1,5 +1,5 @@
 // ============================================================================
-// Built-in Tools — register all M1 tools
+// 内置工具——注册 M1 提供的全部工具
 // ============================================================================
 
 import type { ToolRegistry } from "./registry.js";
@@ -8,7 +8,7 @@ import { FileWriteTool } from "./file-write.js";
 import { TerminalExecTool } from "./terminal-exec.js";
 
 /**
- * Register all built-in M1 tools on the given registry.
+ * 将全部 M1 内置工具注册到指定注册中心。
  */
 export function registerBuiltins(registry: ToolRegistry): void {
   registry.register(new FileReadTool());

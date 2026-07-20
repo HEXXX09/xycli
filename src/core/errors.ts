@@ -1,5 +1,5 @@
 // ============================================================================
-// Error Classes — exact hierarchy from DESIGN.md §12
+// 错误类型——对应 DESIGN.md 第 12 节定义的退出码
 // ============================================================================
 
 export abstract class XycliError extends Error {
@@ -36,7 +36,12 @@ export class PermissionError extends XycliError {
 export class ProviderError extends XycliError {
   code = "PROVIDER_ERROR";
   exitCode = 4 as const;
-  retryable = true;
+  retryable: boolean;
+
+  constructor(message: string, details: Record<string, unknown> = {}) {
+    super(message, details);
+    this.retryable = typeof details.retryable === "boolean" ? details.retryable : true;
+  }
 }
 
 export class ToolError extends XycliError {

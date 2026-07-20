@@ -1,9 +1,9 @@
 // ============================================================================
-// Core Domain Types — exact interfaces from DESIGN.md
+// 核心领域类型——与 DESIGN.md 中的接口保持一致
 // ============================================================================
 
 // ---------------------------------------------------------------------------
-// Permission
+// 权限级别
 // ---------------------------------------------------------------------------
 
 export type PermissionLevel =
@@ -14,7 +14,7 @@ export type PermissionLevel =
   | "full-access";
 
 // ---------------------------------------------------------------------------
-// Agent Loop State (DESIGN.md §5)
+// Agent 循环状态（DESIGN.md 第 5 节）
 // ---------------------------------------------------------------------------
 
 export type AgentLoopState =
@@ -24,22 +24,24 @@ export type AgentLoopState =
   | "OBSERVING"
   | "REFLECTING"
   | "WAITING_APPROVAL"
+  | "INCOMPLETE"
   | "COMPLETED"
   | "ERROR";
 
 // ---------------------------------------------------------------------------
-// Session Status
+// 会话状态
 // ---------------------------------------------------------------------------
 
 export type SessionStatus =
   | "running"
   | "waiting_approval"
   | "completed"
+  | "incomplete"
   | "error"
   | "interrupted";
 
 // ---------------------------------------------------------------------------
-// Provider roles for messages
+// Provider 消息角色
 // ---------------------------------------------------------------------------
 
 export type MessageRole = "system" | "user" | "assistant" | "tool";

@@ -1,12 +1,12 @@
 // ============================================================================
-// PermissionGuard — agent-loop level permission enforcement (M1-T09)
+// PermissionGuard——Agent 循环层的权限强制检查（M1-T09）
 // ============================================================================
 
 import type { PermissionLevel } from "./types.js";
 import { ValidationError } from "./errors.js";
 
 // ---------------------------------------------------------------------------
-// Types
+// 类型定义
 // ---------------------------------------------------------------------------
 
 export type PermissionMode = "read-only" | "auto-safe" | "full-access";
@@ -32,7 +32,7 @@ export interface PermissionDeniedPayload {
 }
 
 // ---------------------------------------------------------------------------
-// Allow-list matrix — explicit, not numeric comparison
+// 显式允许矩阵——不使用容易误放行的数值比较
 // ---------------------------------------------------------------------------
 
 const ALLOWED_LEVELS: Record<PermissionMode, readonly PermissionLevel[]> = {
@@ -50,7 +50,7 @@ const ALLOWED_LEVELS: Record<PermissionMode, readonly PermissionLevel[]> = {
 const VALID_MODES = new Set<string>(["read-only", "auto-safe", "full-access"]);
 
 // ---------------------------------------------------------------------------
-// PermissionGuard
+// 权限守卫
 // ---------------------------------------------------------------------------
 
 export class PermissionGuard {
@@ -65,32 +65,32 @@ export class PermissionGuard {
   }
 
   // -------------------------------------------------------------------------
-  // Static helpers
+  // 静态辅助方法
   // -------------------------------------------------------------------------
 
-  /** Normalize a raw value to a valid PermissionMode. Throws on invalid input. */
+  /** 将外部输入归一化为有效权限模式，非法输入直接抛错。 */
   static normalizeMode(mode: unknown): PermissionMode {
     if (typeof mode === "string" && VALID_MODES.has(mode)) {
       return mode as PermissionMode;
     }
     throw new ValidationError(
-      `Invalid permission mode: ${JSON.stringify(mode)}. ` +
-        `Valid modes: read-only, auto-safe, full-access.`
+      `非法权限模式：${JSON.stringify(mode)}。` +
+        `可选值：read-only、auto-safe、full-access。`
     );
   }
 
-  /** Return the explicit list of allowed levels for a given mode. */
+  /** 返回指定模式显式允许的权限级别。 */
   static allowedLevelsFor(mode: PermissionMode): readonly PermissionLevel[] {
     return ALLOWED_LEVELS[mode];
   }
 
-  /** Static check — returns true if the required level is allowed under the mode. */
+  /** 判断指定模式是否允许目标权限级别。 */
   static check(requiredLevel: PermissionLevel, mode?: PermissionMode): boolean {
     const m = mode ?? "auto-safe";
     return (ALLOWED_LEVELS[m] as readonly string[]).includes(requiredLevel);
   }
 
-  /** Static evaluate — returns a full decision object. */
+  /** 返回包含原因和允许列表的完整权限决策。 */
   static evaluate(
     requiredLevel: PermissionLevel,
     mode?: PermissionMode
@@ -106,11 +106,11 @@ export class PermissionGuard {
       allowedLevels,
       reason: allowed
         ? null
-        : `Permission denied: current mode "${m}" only allows ${allowedLevels.join(", ")}.`,
+        : `权限不足：当前模式“${m}”只允许 ${allowedLevels.join("、")}。`,
     };
   }
 
-  /** Build a structured denied payload for session records and tool messages. */
+  /** 构造供会话审计与工具消息共用的结构化拒绝信息。 */
   static deniedPayload(params: {
     toolName: string;
     requiredLevel: PermissionLevel;
@@ -123,8 +123,8 @@ export class PermissionGuard {
     return {
       code: "PERMISSION_DENIED",
       message:
-        `Permission denied: tool "${toolName}" requires "${requiredLevel}" ` +
-        `but current permission mode "${mode}" allows only: ${allowedList}.`,
+        `权限不足：工具“${toolName}”需要“${requiredLevel}”，` +
+        `当前模式“${mode}”只允许：${allowedList}。`,
       retryable: false,
       details: {
         toolName,
@@ -136,7 +136,7 @@ export class PermissionGuard {
   }
 
   // -------------------------------------------------------------------------
-  // Instance methods
+  // 实例方法
   // -------------------------------------------------------------------------
 
   check(requiredLevel: PermissionLevel): boolean {
@@ -154,7 +154,7 @@ export class PermissionGuard {
       allowedLevels,
       reason: allowed
         ? null
-        : `Permission denied: current mode "${this.#mode}" only allows ${allowedLevels.join(", ")}.`,
+        : `权限不足：当前模式“${this.#mode}”只允许 ${allowedLevels.join("、")}。`,
     };
   }
 

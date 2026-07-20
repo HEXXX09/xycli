@@ -1,6 +1,6 @@
-// DeepSeek Provider — 兼容 OpenAI Chat Completions API
-// api: https://api.deepseek.com
-// 模型: deepseek-chat, deepseek-reasoner
+// DeepSeek Provider——兼容 OpenAI Chat Completions API
+// API 地址：https://api.deepseek.com
+// 支持模型：deepseek-chat、deepseek-reasoner
 
 import OpenAI from "openai";
 import type {
@@ -14,15 +14,14 @@ import type {
   TokenEstimate,
   NormalizedToolCall,
   TokenUsage,
-  ProviderErrorPayload,
   ProviderContentBlock,
 } from "./types.js";
 import { ProviderError } from "../core/errors.js";
 
-const DEEPSEEK_BASE_URL = "https://api.deepseek.com";
+const DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com";
 
 // ---------------------------------------------------------------------------
-// 将 XYCLI 内部消息转为 OpenAI 格式
+// 将 XYCLI 内部消息转换为 OpenAI 格式
 // ---------------------------------------------------------------------------
 
 function toOpenAIMessages(messages: ProviderMessage[]): OpenAI.Chat.Completions.ChatCompletionMessageParam[] {
@@ -32,14 +31,16 @@ function toOpenAIMessages(messages: ProviderMessage[]): OpenAI.Chat.Completions.
     if (typeof m.content === "string") {
       // 纯文本消息
       if (m.role === "tool") {
-        result.push({ role: "tool", tool_call_id: (m as any).tool_use_id || (m as any).toolCallId || "", content: m.content });
+        throw new ProviderError("工具消息必须使用结构化 tool_result 内容块。", {
+          retryable: false,
+        });
       } else {
         result.push({ role: m.role as "user" | "assistant" | "system", content: m.content });
       }
       continue;
     }
 
-    // content blocks 消息
+    // 处理结构化内容块消息。
     const toolCalls: OpenAI.Chat.Completions.ChatCompletionMessageToolCall[] = [];
     let textContent = "";
     const toolResults: Array<{ tool_call_id: string; content: string }> = [];
@@ -57,9 +58,9 @@ function toOpenAIMessages(messages: ProviderMessage[]): OpenAI.Chat.Completions.
           },
         });
       } else if (block.type === "tool_result") {
-        // Anthropic 格式的 tool_result → OpenAI 格式的 tool 消息
+        // 将内部 tool_result 转换为 OpenAI 的 tool 消息。
         toolResults.push({
-          tool_call_id: (block as any).tool_use_id || "",
+          tool_call_id: block.tool_use_id,
           content: typeof block.content === "string" ? block.content : JSON.stringify(block.content),
         });
       }
@@ -72,7 +73,7 @@ function toOpenAIMessages(messages: ProviderMessage[]): OpenAI.Chat.Completions.
         tool_calls: toolCalls,
       });
     } else if (toolResults.length > 0) {
-      // 将 Anthropic tool_result blocks 展开为多条 OpenAI tool 消息
+      // 将多个 tool_result 内容块展开为多条 OpenAI tool 消息。
       for (const tr of toolResults) {
         result.push({
           role: "tool",
@@ -89,7 +90,7 @@ function toOpenAIMessages(messages: ProviderMessage[]): OpenAI.Chat.Completions.
 }
 
 // ---------------------------------------------------------------------------
-// 将 XYCLI 工具定义转为 OpenAI function 格式
+// 将 XYCLI 工具定义转换为 OpenAI function 格式
 // ---------------------------------------------------------------------------
 
 function toOpenAITools(tools: ProviderToolDefinition[]): OpenAI.Chat.Completions.ChatCompletionTool[] {
@@ -104,7 +105,7 @@ function toOpenAITools(tools: ProviderToolDefinition[]): OpenAI.Chat.Completions
 }
 
 // ---------------------------------------------------------------------------
-// 从 OpenAI 回复中提取标准化 tool call
+// 从 OpenAI 响应中提取统一格式的工具调用
 // ---------------------------------------------------------------------------
 
 function extractToolCalls(
@@ -121,7 +122,7 @@ function extractToolCalls(
 }
 
 // ---------------------------------------------------------------------------
-// 构建回复中的 ProviderMessage
+// 将 OpenAI 响应转换为内部 ProviderMessage
 // ---------------------------------------------------------------------------
 
 function toProviderMessage(
@@ -150,14 +151,14 @@ function toProviderMessage(
 }
 
 // ---------------------------------------------------------------------------
-// DeepSeekProvider
+// DeepSeek Provider 实现
 // ---------------------------------------------------------------------------
 
 export class DeepSeekProvider implements IProvider {
   readonly name = "generic-openai" as const;
   private client: OpenAI;
 
-  constructor(apiKey?: string) {
+  constructor(apiKey?: string, client?: OpenAI) {
     const key = apiKey ?? process.env.DEEPSEEK_API_KEY;
     if (!key) {
       throw new ProviderError(
@@ -165,28 +166,31 @@ export class DeepSeekProvider implements IProvider {
         { retryable: false }
       );
     }
-    this.client = new OpenAI({ apiKey: key, baseURL: DEEPSEEK_BASE_URL });
+    this.client = client ?? new OpenAI({
+      apiKey: key,
+      baseURL: process.env.DEEPSEEK_BASE_URL ?? DEFAULT_DEEPSEEK_BASE_URL,
+    });
   }
 
   async chat(request: ProviderRequest): Promise<ProviderResponse> {
     try {
       const messages = toOpenAIMessages(request.messages);
 
-      // 将 system prompt 作为第一条消息插入
+      // 将系统提示词插入消息列表首位。
       if (request.system) {
         messages.unshift({ role: "system", content: request.system });
       }
 
       const tools = request.tools.length > 0 ? toOpenAITools(request.tools) : undefined;
 
-      // DeepSeek 目前只支持非流式 tool calling
+      // 非流式路径直接读取完整工具调用。
       const completion = await this.client.chat.completions.create({
         model: request.model,
         messages,
         tools,
         temperature: request.temperature ?? 0.2,
         max_tokens: request.maxOutputTokens || 4096,
-      });
+      }, { signal: request.signal });
 
       const choice = completion.choices[0];
       const message = toProviderMessage(choice.message);
@@ -199,7 +203,9 @@ export class DeepSeekProvider implements IProvider {
             ? "length"
             : choice.finish_reason === "stop"
               ? "stop"
-              : "stop";
+              : choice.finish_reason === "content_filter"
+                ? "content_filter"
+                : "error";
 
       const usage: TokenUsage = {
         inputTokens: completion.usage?.prompt_tokens ?? 0,
@@ -218,7 +224,7 @@ export class DeepSeekProvider implements IProvider {
     try {
       const messages = toOpenAIMessages(request.messages);
 
-      // 将 system prompt 作为第一条消息插入
+      // 将系统提示词插入消息列表首位。
       if (request.system) {
         messages.unshift({ role: "system", content: request.system });
       }
@@ -232,11 +238,12 @@ export class DeepSeekProvider implements IProvider {
         temperature: request.temperature ?? 0.2,
         max_tokens: request.maxOutputTokens || 4096,
         stream: true,
-      });
+      }, { signal: request.signal });
 
       let fullContent = "";
-      const toolCalls: NormalizedToolCall[] = [];
+      const toolBuffers = new Map<number, { id: string; name: string; arguments: string }>();
       let usage: TokenUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+      let finishReason: ProviderResponse["finishReason"] = "stop";
 
       for await (const chunk of stream) {
         const delta = chunk.choices[0]?.delta;
@@ -248,28 +255,24 @@ export class DeepSeekProvider implements IProvider {
 
         if (delta?.tool_calls) {
           for (const tc of delta.tool_calls) {
-            if (tc.id) {
-              toolCalls.push({
-                id: tc.id,
-                name: tc.function?.name || "",
-                input: {},
-              });
-              yield {
-                type: "tool_call_delta",
-                call: { id: tc.id, name: tc.function?.name || "", input: {} },
-              };
-            }
-            // 累积 JSON 参数（DeepSeek 流式可能一次性返回完整参数）
-            if (tc.function?.arguments && toolCalls.length > 0) {
-              try {
-                const last = toolCalls[toolCalls.length - 1];
-                last.input = JSON.parse(tc.function.arguments);
-              } catch {
-                // 部分 JSON，跳过
-              }
-            }
+            const index = tc.index;
+            const current = toolBuffers.get(index) ?? { id: "", name: "", arguments: "" };
+            if (tc.id) current.id = tc.id;
+            if (tc.function?.name) current.name += tc.function.name;
+            if (tc.function?.arguments) current.arguments += tc.function.arguments;
+            toolBuffers.set(index, current);
+            yield {
+              type: "tool_call_delta",
+              call: { id: current.id, name: current.name },
+            };
           }
         }
+
+        const chunkFinishReason = chunk.choices[0]?.finish_reason;
+        if (chunkFinishReason === "tool_calls") finishReason = "tool_calls";
+        else if (chunkFinishReason === "length") finishReason = "length";
+        else if (chunkFinishReason === "content_filter") finishReason = "content_filter";
+        else if (chunkFinishReason === "stop") finishReason = "stop";
 
         if (chunk.usage) {
           usage = {
@@ -282,12 +285,18 @@ export class DeepSeekProvider implements IProvider {
         }
       }
 
-      // 流结束，发送最终响应
+      const toolCalls: NormalizedToolCall[] = Array.from(toolBuffers.values()).map((toolCall) => ({
+        id: toolCall.id,
+        name: toolCall.name,
+        input: JSON.parse(toolCall.arguments || "{}") as Record<string, unknown>,
+      }));
+
+      // 流结束后发送包含完整工具参数的最终响应。
       const response: ProviderResponse = {
         message: { role: "assistant", content: fullContent || [{ type: "text", text: "" }] },
         toolCalls,
         usage,
-        finishReason: toolCalls.length > 0 ? "tool_calls" : "stop",
+        finishReason: toolCalls.length > 0 ? "tool_calls" : finishReason,
       };
 
       yield { type: "done", response };
@@ -310,7 +319,7 @@ export class DeepSeekProvider implements IProvider {
   }
 
   async estimateTokens(input: ProviderTokenInput): Promise<TokenEstimate> {
-    // 中英文约 1.5 字符/token
+    // 中英文混合场景按平均约 1.5 个字符一个 Token 估算。
     let totalChars = input.system.length;
     for (const msg of input.messages) {
       if (typeof msg.content === "string") {

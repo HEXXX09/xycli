@@ -1,5 +1,5 @@
 // ============================================================================
-// Anthropic Provider Adapter — DESIGN.md §6
+// Anthropic Provider 适配器——对应 DESIGN.md 第 6 节
 // ============================================================================
 
 import Anthropic from "@anthropic-ai/sdk";
@@ -15,12 +15,11 @@ import type {
   NormalizedToolCall,
   TokenUsage,
   ProviderContentBlock,
-  ProviderErrorPayload,
 } from "./types.js";
 import { ProviderError } from "../core/errors.js";
 
 // ---------------------------------------------------------------------------
-// Anthropic → internal mapping helpers
+// Anthropic 协议到内部协议的映射方法
 // ---------------------------------------------------------------------------
 
 function toAnthropicTools(
@@ -40,7 +39,7 @@ function toAnthropicMessages(
     if (typeof m.content === "string") {
       return { role: m.role as Anthropic.MessageParam["role"], content: m.content };
     }
-    // Content blocks
+    // 转换结构化内容块。
     const blocks: Anthropic.ContentBlockParam[] = m.content.map((block) => {
       switch (block.type) {
         case "text":
@@ -106,15 +105,14 @@ function toProviderMessage(
 }
 
 // ---------------------------------------------------------------------------
-// AnthropicProvider
+// Anthropic Provider 实现
 // ---------------------------------------------------------------------------
 
 export class AnthropicProvider implements IProvider {
   readonly name = "anthropic" as const;
   private client: Anthropic;
-  private abortController: AbortController | null = null;
 
-  constructor(apiKey?: string) {
+  constructor(apiKey?: string, client?: Anthropic) {
     const key = apiKey ?? process.env.ANTHROPIC_API_KEY;
     if (!key) {
       throw new ProviderError(
@@ -122,11 +120,11 @@ export class AnthropicProvider implements IProvider {
         { retryable: false }
       );
     }
-    this.client = new Anthropic({ apiKey: key });
+    this.client = client ?? new Anthropic({ apiKey: key });
   }
 
   // -----------------------------------------------------------------------
-  // chat — non-streaming
+  // 非流式对话
   // -----------------------------------------------------------------------
 
   async chat(request: ProviderRequest): Promise<ProviderResponse> {
@@ -141,7 +139,7 @@ export class AnthropicProvider implements IProvider {
         system: systemText,
         messages: toAnthropicMessages(request.messages),
         tools,
-      });
+      }, { signal: request.signal });
 
       const message = toProviderMessage(response);
       const toolCalls: NormalizedToolCall[] = [];
@@ -173,7 +171,7 @@ export class AnthropicProvider implements IProvider {
   }
 
   // -----------------------------------------------------------------------
-  // streamChat — async generator for streaming
+  // 通过异步生成器输出流式事件
   // -----------------------------------------------------------------------
 
   async *streamChat(
@@ -181,8 +179,6 @@ export class AnthropicProvider implements IProvider {
   ): AsyncIterable<ProviderStreamEvent> {
     const systemText = request.system || undefined;
     const tools = request.tools.length > 0 ? toAnthropicTools(request.tools) : undefined;
-    this.abortController = new AbortController();
-
     try {
       const stream = this.client.messages.stream({
         model: request.model,
@@ -191,10 +187,9 @@ export class AnthropicProvider implements IProvider {
         system: systemText,
         messages: toAnthropicMessages(request.messages),
         tools,
-      });
+      }, { signal: request.signal });
 
-      // Collect blocks incrementally
-      const contentBlocks: Anthropic.ContentBlock[] = [];
+      // 按事件增量收集用量、停止原因和工具调用信息。
       let currentToolUse: Partial<Anthropic.ToolUseBlock> | null = null;
       let finalUsage: TokenUsage = {
         inputTokens: 0,
@@ -220,7 +215,6 @@ export class AnthropicProvider implements IProvider {
                 input: {},
               };
             }
-            contentBlocks.push(event.content_block);
             break;
 
           case "content_block_delta":
@@ -230,7 +224,7 @@ export class AnthropicProvider implements IProvider {
               event.delta.type === "input_json_delta" &&
               currentToolUse
             ) {
-              // Accumulate JSON for tool call — yield partial
+              // 输出工具参数增量；完整 JSON 以 finalMessage() 为准。
               yield {
                 type: "tool_call_delta",
                 call: {
@@ -245,7 +239,7 @@ export class AnthropicProvider implements IProvider {
             break;
 
           case "content_block_stop":
-            // Block complete
+            // 内容块已经结束，无需额外处理。
             break;
 
           case "message_delta":
@@ -266,22 +260,10 @@ export class AnthropicProvider implements IProvider {
         }
       }
 
-      // Build final response from collected blocks
-      const finalMessage: Anthropic.Message = {
-        id: "msg_stream",
-        type: "message",
-        role: "assistant",
-        content: contentBlocks,
-        model: request.model,
-        stop_reason: stopReason,
-        stop_sequence: null,
-        usage: {
-          input_tokens: finalUsage.inputTokens,
-          output_tokens: finalUsage.outputTokens,
-          cache_creation_input_tokens: finalUsage.cacheWriteTokens || null,
-          cache_read_input_tokens: finalUsage.cacheReadTokens || null,
-        },
-      };
+      // SDK 会在 finalMessage() 中完成文本和工具 JSON 的累积。
+      const finalMessage = await stream.finalMessage();
+      finalUsage = normalizeUsage(finalMessage.usage);
+      stopReason = finalMessage.stop_reason;
 
       const message = toProviderMessage(finalMessage);
       const toolCalls: NormalizedToolCall[] = [];
@@ -324,20 +306,20 @@ export class AnthropicProvider implements IProvider {
   }
 
   // -----------------------------------------------------------------------
-  // supportsTools
+  // 工具能力判断
   // -----------------------------------------------------------------------
 
   supportsTools(_model: string): boolean {
-    // All Claude models support tools
+    // 当前支持的 Claude 模型均提供工具调用能力。
     return true;
   }
 
   // -----------------------------------------------------------------------
-  // estimateTokens — rough heuristic
+  // Token 粗略估算
   // -----------------------------------------------------------------------
 
   async estimateTokens(input: ProviderTokenInput): Promise<TokenEstimate> {
-    // Rough heuristic: ~3.5 chars per token for English text
+    // 英文文本按平均约 3.5 个字符一个 Token 估算。
     let totalChars = input.system.length;
     for (const msg of input.messages) {
       if (typeof msg.content === "string") {
@@ -353,15 +335,7 @@ export class AnthropicProvider implements IProvider {
   }
 
   // -----------------------------------------------------------------------
-  // abort
-  // -----------------------------------------------------------------------
-
-  abort(): void {
-    this.abortController?.abort();
-  }
-
-  // -----------------------------------------------------------------------
-  // error wrapping
+  // 统一错误包装
   // -----------------------------------------------------------------------
 
   private wrapError(err: unknown): ProviderError {

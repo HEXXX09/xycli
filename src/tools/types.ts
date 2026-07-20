@@ -1,11 +1,12 @@
 // ============================================================================
-// Tool Types — exact interfaces from DESIGN.md §4
+// 工具类型——对应 DESIGN.md 第 4 节
 // ============================================================================
 
 import type { PermissionLevel } from "../core/types.js";
+import type { ZodType } from "zod";
 
 // ---------------------------------------------------------------------------
-// JSON Schema (minimal subset for tool definitions)
+// 工具定义使用的 JSON Schema 最小子集
 // ---------------------------------------------------------------------------
 
 export interface JSONSchema7 {
@@ -31,11 +32,11 @@ export interface JSONSchema7 {
 }
 
 // ---------------------------------------------------------------------------
-// PermissionPolicy — simplified in M1, full form in M9
+// 权限策略——M1 简化实现，M9 再扩展完整规则
 // ---------------------------------------------------------------------------
 
 export interface PermissionPolicy {
-  mode: "ask" | "auto-safe" | "read-only";
+  mode: "read-only" | "auto-safe" | "full-access";
   defaultLevel: PermissionLevel;
   allow: PermissionRules;
   deny: PermissionRules;
@@ -52,7 +53,7 @@ export interface PermissionRules {
 }
 
 // ---------------------------------------------------------------------------
-// StructuredLogger — minimal interface in M1
+// 结构化日志——M1 最小接口
 // ---------------------------------------------------------------------------
 
 export interface StructuredLogger {
@@ -62,7 +63,7 @@ export interface StructuredLogger {
 }
 
 // ---------------------------------------------------------------------------
-// ToolExecutionContext — exact from DESIGN.md §4.1
+// 工具执行上下文——对应 DESIGN.md 第 4.1 节
 // ---------------------------------------------------------------------------
 
 export interface ToolExecutionContext {
@@ -77,7 +78,7 @@ export interface ToolExecutionContext {
 }
 
 // ---------------------------------------------------------------------------
-// ToolErrorPayload
+// 工具错误结构
 // ---------------------------------------------------------------------------
 
 export interface ToolErrorPayload {
@@ -88,7 +89,7 @@ export interface ToolErrorPayload {
 }
 
 // ---------------------------------------------------------------------------
-// ToolResult — exact from DESIGN.md §4.1
+// 工具执行结果——对应 DESIGN.md 第 4.1 节
 // ---------------------------------------------------------------------------
 
 export interface ToolResult<TOutput = unknown> {
@@ -102,13 +103,14 @@ export interface ToolResult<TOutput = unknown> {
 }
 
 // ---------------------------------------------------------------------------
-// ITool — exact from DESIGN.md §4.1
+// 工具统一接口——对应 DESIGN.md 第 4.1 节
 // ---------------------------------------------------------------------------
 
 export interface ITool<TInput extends object = object, TOutput = unknown> {
   name: string;
   description: string;
   inputSchema: JSONSchema7;
+  inputValidator: ZodType<TInput>;
   permissionLevel: PermissionLevel;
   defaultTimeoutMs: number;
   idempotencyKey(input: TInput, context: ToolExecutionContext): string;

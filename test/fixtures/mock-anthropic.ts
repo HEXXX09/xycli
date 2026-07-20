@@ -1,5 +1,5 @@
 // ============================================================================
-// Mock Anthropic Provider for testing
+// 测试使用的 Anthropic 模拟 Provider
 // ============================================================================
 
 import type {
@@ -17,18 +17,22 @@ export interface MockScenario {
 }
 
 /**
- * A deterministic mock provider that returns pre-configured responses in sequence.
+ * 按顺序返回预配置响应的确定性模拟 Provider。
  */
 export class MockAnthropicProvider implements IProvider {
   readonly name = "anthropic" as const;
   private responses: ProviderResponse[];
   private callCount = 0;
+  readonly requests: ProviderRequest[] = [];
+  onRequest?: (request: ProviderRequest) => void;
 
   constructor(responses: ProviderResponse[]) {
     this.responses = responses;
   }
 
-  async chat(_request: ProviderRequest): Promise<ProviderResponse> {
+  async chat(request: ProviderRequest): Promise<ProviderResponse> {
+    this.requests.push(request);
+    this.onRequest?.(request);
     const response = this.responses[this.callCount % this.responses.length];
     this.callCount++;
     return response;
@@ -40,7 +44,7 @@ export class MockAnthropicProvider implements IProvider {
     const response = this.responses[this.callCount % this.responses.length];
     this.callCount++;
 
-    // Yield text from the message
+    // 按内容块输出文本增量。
     if (typeof response.message.content === "string") {
       yield { type: "text_delta", text: response.message.content };
     } else {
@@ -66,11 +70,12 @@ export class MockAnthropicProvider implements IProvider {
   reset(responses: ProviderResponse[]): void {
     this.responses = responses;
     this.callCount = 0;
+    this.requests.length = 0;
   }
 }
 
 // ---------------------------------------------------------------------------
-// Helper factories for common mock responses
+// 常用模拟响应构造方法
 // ---------------------------------------------------------------------------
 
 export function makeTextResponse(text: string): ProviderResponse {

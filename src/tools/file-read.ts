@@ -1,15 +1,19 @@
 // ============================================================================
-// file_read tool — read a file with line numbers
+// file_read 工具——读取文件及指定行范围
 // ============================================================================
 
 import * as fs from "node:fs/promises";
-import * as path from "node:path";
 import { createHash } from "node:crypto";
 import type { ITool, ToolResult, ToolExecutionContext, JSONSchema7 } from "./types.js";
 import type { PermissionLevel } from "../core/types.js";
+import { z } from "zod";
+import {
+  resolveExistingWorkspacePath,
+  WorkspacePathError,
+} from "./path-policy.js";
 
 // ---------------------------------------------------------------------------
-// Input / Output types
+// 输入输出类型
 // ---------------------------------------------------------------------------
 
 export interface FileReadInput {
@@ -30,40 +34,57 @@ export interface FileReadOutput {
 }
 
 // ---------------------------------------------------------------------------
-// Tool implementation
+// 工具实现
 // ---------------------------------------------------------------------------
 
 const DEFAULT_MAX_BYTES = 2 * 1024 * 1024; // 2 MB
 
+const fileReadInputValidator = z.object({
+  path: z.string().min(1).max(4096),
+  startLine: z.number().int().min(1).optional(),
+  endLine: z.number().int().min(1).optional(),
+  maxBytes: z.number().int().min(1).max(DEFAULT_MAX_BYTES).optional(),
+}).strict().refine(
+  (input) => input.endLine === undefined || input.startLine === undefined || input.endLine >= input.startLine,
+  { message: "endLine 必须大于或等于 startLine", path: ["endLine"] }
+);
+
 export class FileReadTool implements ITool<FileReadInput, FileReadOutput> {
   name = "file_read";
   description =
-    "Read the contents of a file. Returns the file content with line numbers. " +
-    "Supports reading specific line ranges. Files larger than 2 MB will be truncated.";
+    "读取工作区内文件，可指定行范围。超过 2 MiB 的文件会被截断，并返回 SHA-256。";
   permissionLevel: PermissionLevel = "read-only";
   defaultTimeoutMs = 30_000;
+  inputValidator = fileReadInputValidator;
 
   inputSchema: JSONSchema7 = {
     type: "object",
     properties: {
       path: {
         type: "string",
-        description: "The path to the file to read (absolute or relative to CWD)",
+        minLength: 1,
+        maxLength: 4096,
+        description: "要读取的工作区内文件路径",
       },
       startLine: {
         type: "number",
-        description: "The first line to read (1-indexed, defaults to 1)",
+        minimum: 1,
+        description: "起始行，从 1 开始，默认第 1 行",
       },
       endLine: {
         type: "number",
-        description: "The last line to read (inclusive, defaults to end of file)",
+        minimum: 1,
+        description: "结束行，包含该行，默认到文件末尾",
       },
       maxBytes: {
         type: "number",
-        description: "Maximum bytes to read (default 2 MB)",
+        minimum: 1,
+        maximum: DEFAULT_MAX_BYTES,
+        description: "最大读取字节数，默认 2 MiB",
       },
     },
     required: ["path"],
+    additionalProperties: false,
   };
 
   idempotencyKey(input: FileReadInput, _context: ToolExecutionContext): string {
@@ -78,12 +99,10 @@ export class FileReadTool implements ITool<FileReadInput, FileReadOutput> {
     const maxBytes = input.maxBytes ?? DEFAULT_MAX_BYTES;
 
     try {
-      // Resolve path relative to cwd
-      const resolvedPath = path.isAbsolute(input.path)
-        ? input.path
-        : path.resolve(context.cwd, input.path);
+      // 统一解析真实路径，避免绝对路径、.. 和符号链接逃逸工作区。
+      const resolvedPath = await resolveExistingWorkspacePath(input.path, context.cwd);
 
-      // Check if file exists and is accessible
+      // 检查目标是否为可访问的普通文件。
       let stat: Awaited<ReturnType<typeof fs.stat>>;
       try {
         stat = await fs.stat(resolvedPath);
@@ -121,10 +140,10 @@ export class FileReadTool implements ITool<FileReadInput, FileReadOutput> {
         };
       }
 
-      // Read the file
+      // 按大小限制读取文件。
       let content: string;
       if (stat.size > maxBytes) {
-        // Read only up to maxBytes
+        // 大文件只读取前 maxBytes 个字节。
         const buf = Buffer.alloc(maxBytes);
         const fd = await fs.open(resolvedPath, "r");
         try {
@@ -140,7 +159,7 @@ export class FileReadTool implements ITool<FileReadInput, FileReadOutput> {
       const truncated = stat.size > maxBytes;
       const lines = content.split("\n");
 
-      // Apply line range
+      // 截取用户指定的行范围。
       const startLine = input.startLine ?? 1;
       const endLine = input.endLine ?? lines.length;
       const selectedLines = lines.slice(Math.max(0, startLine - 1), endLine);
@@ -176,7 +195,11 @@ export class FileReadTool implements ITool<FileReadInput, FileReadOutput> {
         success: false,
         output: null,
         error: {
-          code: "FILE_READ_ERROR",
+          code: err instanceof WorkspacePathError
+            ? err.code
+            : (err as NodeJS.ErrnoException)?.code === "ENOENT"
+              ? "FILE_NOT_FOUND"
+              : "FILE_READ_ERROR",
           message,
           retryable: false,
           details: { path: input.path },
