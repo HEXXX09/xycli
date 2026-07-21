@@ -4,6 +4,8 @@
 //! 工具执行和会话持久化，便于 CLI、桌面端或服务端复用同一套行为。
 
 pub mod agent;
+pub mod config;
+pub mod credentials;
 pub mod error;
 pub mod permission;
 pub mod prompt;
@@ -12,8 +14,17 @@ pub mod session;
 pub mod tools;
 
 pub use agent::{AgentRunConfig, AgentRunResult, run_agent};
+pub use config::{
+    AppConfig, ConfigOverrides, ConfigSource, ResolvedConfig, config_paths, load_config,
+    write_config_value,
+};
+pub use credentials::{
+    KeyringSecretStore, SecretSource, SecretStore, SecretString, resolve_secret,
+};
 pub use error::{ErrorKind, XycliError, XycliResult};
 pub use permission::{PermissionLevel, PermissionMode};
-pub use provider::{AnthropicProvider, DeepSeekProvider, Provider};
+pub use provider::{
+    AnthropicProvider, DeepSeekProvider, DefaultProviderFactory, Provider, ProviderFactory,
+};
 pub use session::{JsonSessionStore, SessionStore};
 pub use tools::{ToolRegistry, register_builtins};

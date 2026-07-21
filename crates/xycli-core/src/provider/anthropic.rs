@@ -1,6 +1,6 @@
 //! Anthropic Messages API 适配器。
 
-use std::env;
+use std::{env, time::Duration};
 
 use async_trait::async_trait;
 use reqwest::Client;
@@ -29,10 +29,18 @@ impl AnthropicProvider {
     }
 
     pub fn new(api_key: impl Into<String>, base_url: impl Into<String>) -> XycliResult<Self> {
+        Self::with_timeout(api_key, base_url, Duration::from_secs(180))
+    }
+
+    pub fn with_timeout(
+        api_key: impl Into<String>,
+        base_url: impl Into<String>,
+        timeout: Duration,
+    ) -> XycliResult<Self> {
         Ok(Self {
             api_key: api_key.into(),
             base_url: base_url.into().trim_end_matches('/').to_owned(),
-            client: http_client()?,
+            client: http_client(timeout)?,
         })
     }
 

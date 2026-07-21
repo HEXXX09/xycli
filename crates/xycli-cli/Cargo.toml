@@ -13,6 +13,8 @@ path = "src/main.rs"
 
 [dependencies]
 clap.workspace = true
+rpassword.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 uuid.workspace = true

@@ -2,6 +2,7 @@
 
 mod anthropic;
 mod deepseek;
+mod factory;
 
 use std::time::Duration;
 
@@ -15,6 +16,7 @@ use crate::error::{ErrorKind, XycliError, XycliResult};
 
 pub use anthropic::AnthropicProvider;
 pub use deepseek::DeepSeekProvider;
+pub use factory::{DefaultProviderFactory, ProviderFactory};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -146,9 +148,9 @@ pub trait Provider: Send + Sync {
     }
 }
 
-pub(super) fn http_client() -> XycliResult<Client> {
+pub(super) fn http_client(timeout: Duration) -> XycliResult<Client> {
     Client::builder()
-        .timeout(Duration::from_secs(180))
+        .timeout(timeout)
         .user_agent(concat!("xycli/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|error| XycliError::provider(format!("无法创建 HTTP 客户端：{error}"), false))

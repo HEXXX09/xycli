@@ -115,14 +115,52 @@ fn 未知_provider_返回参数退出码() {
 }
 
 #[test]
-fn 缺少_api_key_返回_provider_退出码() {
+fn 缺少_api_key_返回配置退出码和登录指引() {
     let output = xycli()
         .env_remove("ANTHROPIC_API_KEY")
         .arg("test")
         .output()
         .unwrap();
-    assert_eq!(output.status.code(), Some(4));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("ANTHROPIC_API_KEY"));
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("ANTHROPIC_API_KEY"));
+    assert!(stderr.contains("xycli auth login anthropic"));
+}
+
+#[test]
+fn config_命令无需_api_key_并展示来源() {
+    let dir = tempdir().unwrap();
+    let output = xycli()
+        .current_dir(dir.path())
+        .env_remove("ANTHROPIC_API_KEY")
+        .args(["config", "show"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("\"provider\""));
+    assert!(stdout.contains("\"sources\""));
+    assert!(!stdout.contains("API_KEY"));
+}
+
+#[test]
+fn config_set_写入项目配置并可解释来源() {
+    let dir = tempdir().unwrap();
+    let set = xycli()
+        .current_dir(dir.path())
+        .args(["config", "set", "agent.max_turns", "31"])
+        .output()
+        .unwrap();
+    assert!(set.status.success());
+    let explain = xycli()
+        .current_dir(dir.path())
+        .args(["config", "explain", "agent.max_turns"])
+        .output()
+        .unwrap();
+    assert!(explain.status.success());
+    let stdout = String::from_utf8_lossy(&explain.stdout);
+    assert!(stdout.contains("31"));
+    assert!(stdout.contains("project"));
 }
 
 #[test]
