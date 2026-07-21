@@ -1,5 +1,6 @@
 //! XYCLI Rust 命令行入口。
 
+mod doctor;
 mod renderer;
 
 use std::{
@@ -20,6 +21,7 @@ use xycli_core::{
     register_builtins, resolve_secret, run_agent, write_config_value,
 };
 
+use crate::doctor::run_doctor;
 use crate::renderer::ConsoleRenderer;
 
 #[derive(Debug, Parser)]
@@ -445,8 +447,7 @@ async fn run() -> Result<u8, XycliError> {
             return handle_auth(command, &resolved).await;
         }
         Some(Command::Doctor) => {
-            println!("doctor 将在 M2-T09 完成。");
-            return Ok(0);
+            return run_doctor(&cwd, cli_overrides, cli.json).await;
         }
         _ => {}
     }

@@ -1,50 +1,114 @@
 # XYCLI 详细设计
 
-> 当前版本：Rust-only v0.2.0 基线。本文描述已经实现的核心边界；尚未实现的设计集中记录在 `NEXT_PHASE_DESIGN.md`。
+> 当前版本：Rust-only v0.3.0。本文描述已经实现并通过本地验收的设计边界。
 
-## 1. 工作区与依赖方向
-
-```text
-Cargo workspace
-├── crates/xycli-cli
-│   ├── clap 参数解析
-│   ├── 单次任务与 REPL
-│   ├── Ctrl+C 取消
-│   └── 进程退出码
-└── crates/xycli-core
-    ├── agent.rs
-    ├── provider.rs
-    ├── permission.rs
-    ├── prompt.rs
-    ├── session.rs
-    ├── error.rs
-    └── tools/
-```
-
-依赖方向固定为：
+## 1. 依赖方向
 
 ```text
 xycli-cli → xycli-core
-Agent → Provider trait
-      → ToolRegistry
-      → SessionStore trait
+CLI → Config + SecretStore + ProviderFactory
+Agent → Provider trait + ToolRegistry + SessionStore + EventSink
+Provider wrapper → 具体 Provider
 Tool → PermissionMode + 工作区策略
+Renderer → AgentEvent
 ```
 
-`xycli-core` 不读取终端输入，也不创建具体界面，CLI 负责组合 Provider、工具和存储。新增桌面端或服务端时应复用核心库，而不是复制 Agent 循环。
+核心库不读取终端输入、不输出 ANSI、不依赖具体界面。CLI 负责命令解析、依赖装配、交互输入和事件渲染。
 
-## 2. Agent 运行时
+## 2. 配置解析
 
-`AgentRunConfig` 输入 prompt、model、max_turns、cwd、Provider、ToolRegistry、SessionStore、权限模式、取消令牌和可选会话 ID。`run_agent` 负责：
+`load_config` 接收工作目录和 CLI 覆盖项，按以下顺序覆盖：
 
-1. 校验 prompt 和轮次；
-2. 创建或恢复会话；
-3. 构建系统提示词和工具 Schema；
-4. 请求 Provider；
-5. 记录文本、Token 与工具调用；
-6. 执行权限检查和工具调用；
-7. 将结果写回上下文并继续下一轮；
-8. 保存完成、未完成、中断或错误终态。
+```text
+默认值 → 用户 TOML → 项目 TOML → 环境变量 → CLI
+```
+
+最终优先级即 CLI、环境、项目、用户、默认值。`ResolvedConfig` 同时保存每个点路径的 `ConfigSource`。
+
+当前配置模型：
+
+```text
+provider.name
+provider.model
+provider.base_url
+provider.timeout_seconds
+provider.max_attempts
+provider.retry_base_ms
+provider.min_request_interval_ms
+agent.max_turns
+agent.permission
+output.json
+output.no_stream
+output.color
+```
+
+关键校验：Provider 只能是 `anthropic` 或 `deepseek`；模型非空；轮次、超时、重试和节流必须在限定范围；Base URL 要求 HTTPS，本机回环地址例外；TOML 中发现 key、token、secret 等秘密字段时拒绝加载。
+
+`config set` 只写白名单字段，先解析和校验用户输入，再写同目录临时文件并重命名。CLI 覆盖不会被隐式写回磁盘。
+
+## 3. 凭据模型
+
+`SecretStore` 隔离平台凭据实现：
+
+```rust
+#[async_trait]
+pub trait SecretStore: Send + Sync {
+    async fn get(&self, provider: &str) -> XycliResult<Option<SecretString>>;
+    async fn set(&self, provider: &str, value: SecretString) -> XycliResult<()>;
+    async fn delete(&self, provider: &str) -> XycliResult<()>;
+}
+```
+
+`KeyringSecretStore` 通过系统凭据服务读写，`auth login` 使用隐藏输入。运行时查找顺序是 Provider 专用环境变量优先、系统凭据其次。
+
+`SecretString` 使用可清零内存容器；Debug 和 Display 只输出脱敏内容。状态和配置命令只报告来源或是否存在，绝不输出原文。系统凭据不可用时返回可操作提示，不创建明文 secret 文件。
+
+## 4. Provider Factory
+
+`DefaultProviderFactory` 接收已经解析的 Provider 配置和 Secret：
+
+1. 校验 Provider、模型、URL 和超时；
+2. 创建 Anthropic 或 DeepSeek 客户端；
+3. 使用 `RetryingProvider` 包装具体实例；
+4. 注入最大尝试次数、基础退避和最小请求间隔；
+5. 以 trait object 交给 Agent。
+
+Agent 不根据字符串判断厂商，厂商协议差异只存在于 Provider 目录。
+
+## 5. Provider 接口和流
+
+`Provider` 同时支持完整响应和流式响应。默认流实现可以把非流式结果转为统一事件，具体 Provider 覆盖 `stream_chat` 实现真实 SSE。
+
+统一流事件包括文本增量、完成的响应和厂商无关错误。SSE 解码器允许网络块在任意字节位置切分，并以空行识别完整事件。
+
+Anthropic 按 content block 索引聚合文本、工具名和 `input_json_delta`；DeepSeek 按 choice/tool-call 索引聚合 `delta.content`、函数名和 arguments。收到终止事件后生成一个完整 `ProviderResponse`，再由 Agent 决定是否执行工具。
+
+以下情况视为协议错误：
+
+- 流结束但缺少正常终止标记；
+- 工具参数 JSON 不完整或无法解析；
+- 必需字段缺失；
+- HTTP 成功但事件格式不符合协议。
+
+## 6. 安全重试和节流
+
+重试边界固定为一次模型请求：
+
+```text
+等待最小请求间隔
+  → 发起 Provider 请求
+    → 成功：返回
+    → 可重试且尚未产生有效输出：退避后重试
+    → 不可重试、已输出或次数耗尽：返回错误
+```
+
+连接失败、超时、408、409、429 和 5xx 可重试；400、401、403、404、配置错误、Schema 错误和内容错误不可重试。退避为带抖动的指数增长并尊重 `Retry-After`，所有等待接受取消信号。
+
+工具执行不在重试闭包中。上一轮成功执行工具后，下一次模型调用是新的请求；其网络重试不会重新执行上一轮工具。SSE 已发送文本后发生错误时直接失败，避免终端收到重复前缀。
+
+## 7. Agent 运行时与事件
+
+`AgentRunConfig` 输入 prompt、model、max_turns、cwd、Provider、ToolRegistry、SessionStore、权限模式、取消令牌、EventSink 和可选会话 ID。
 
 状态机：
 
@@ -56,28 +120,23 @@ Idle → Planning → Acting → Observing
 任意运行态 → Completed | Incomplete | Interrupted | Error
 ```
 
-只有 `Completed` 返回退出码 0。达到最大轮次和模型输出截断都属于 `Incomplete`，不能伪装为成功。
+Agent 将状态、文本增量、工具开始、工具结束、用量和告警发送为 `AgentEvent`。Renderer 只是消费者，不能改变 Agent 领域状态。达到最大轮次或模型长度截断均为 `Incomplete`。
 
-## 3. Provider
+## 8. Renderer
 
-`Provider` trait 当前提供：
+CLI Renderer 有三种输出策略：
 
-```rust
-#[async_trait]
-pub trait Provider: Send + Sync {
-    fn name(&self) -> &'static str;
-    async fn chat(&self, request: ProviderRequest) -> XycliResult<ProviderResponse>;
-    fn supports_tools(&self, model: &str) -> bool;
-}
-```
+| 模式 | 行为 |
+| --- | --- |
+| 默认 | 文本增量立即写终端，工具事件给出状态提示 |
+| `--no-stream` | 缓存文本，在完成点统一输出 |
+| `--json` | 每个事件一行 JSON，末尾输出运行结果 |
 
-内部消息统一表示文本、工具调用和工具结果。Anthropic 与 DeepSeek 只负责厂商协议转换、认证、HTTP 错误映射和响应归一化，不参与 Agent 状态决策。
+`--no-color` 和 `NO_COLOR` 禁用颜色。JSON 字段不包含 ANSI，并适合管道消费。CLI 的打印错误也不得包含 Secret 原文。
 
-当前请求超时为 180 秒，并响应 `CancellationToken`。HTTP 408、409、429、500、502、503、504 会被标记为可重试，但重试策略尚未执行。
+## 9. 工具和权限
 
-## 4. 工具注册与结果
-
-每个 Tool 声明名称、描述、JSON Schema、权限级别、默认超时和异步执行逻辑。ToolRegistry 的固定顺序是：
+ToolRegistry 的固定顺序是：
 
 ```text
 查找工具
@@ -88,107 +147,56 @@ pub trait Provider: Send + Sync {
   → 归一化 ToolResult
 ```
 
-模型输入使用 `serde_json::Value`，每个工具实现是运行时权威校验器。业务失败通过结构化结果返回模型；基础设施错误才升级为 Agent 错误。
+`file_read` 仅访问工作区内路径并提供范围、截断和 SHA-256。`file_write` 支持 `expectedSha256` 冲突保护和原子写入。`terminal_exec` 只接受程序名与参数数组，不经过 shell，输出有界且可超时取消。
 
-## 5. 内置工具
+权限使用显式矩阵，新增级别必须默认拒绝。项目配置、提示词和模型输出都不能提升 CLI 选择的权限。
 
-### 5.1 file_read
+## 10. 会话持久化
 
-- 只接受工作区内相对路径；
-- 支持行范围和读取大小上限；
-- 返回内容、范围、截断标记和 SHA-256；
-- 已存在目标必须通过真实路径检查。
-
-### 5.2 file_write
-
-- 内容最大 2 MiB；
-- 可用 `expectedSha256` 防止覆盖用户并发修改；
-- 待创建路径通过最近已存在祖先解析符号链接；
-- 写入同目录唯一临时文件后原子重命名；
-- 返回写入前后哈希与差异。
-
-### 5.3 terminal_exec
-
-- `command` 是单个程序名，参数只能放入 `args`；
-- 使用 `tokio::process::Command`，不调用 shell；
-- 工作目录必须位于工作区；
-- stdout、stderr 各自限制保留 100,000 字节；
-- 超时或取消时终止子进程；
-- `auto-safe` 只允许受限的 `pwd`、`echo`、`ls`、`git status/diff/log/show`。
-
-## 6. 权限与安全
-
-权限模式使用显式矩阵：
-
-| 模式 | 能力 |
-| --- | --- |
-| `read-only` | 只读工具 |
-| `auto-safe` | 工作区读写与安全命令 |
-| `full-access` | 全部工具级能力与任意本地程序 |
-
-安全边界分三层：
-
-```text
-工具级权限矩阵
-  → 输入 Schema 和范围校验
-    → 文件真实路径或命令语义策略
-```
-
-新增权限级别时必须默认拒绝；不能依赖枚举顺序自动放行。项目指令、模型输出和插件声明都不能提升 CLI 选择的权限模式。
-
-## 7. 会话持久化
-
-`SessionStore` 隔离存储实现，当前 `JsonSessionStore` 将会话写入 `.xycli/sessions/json/<uuid>.json`：
+`JsonSessionStore` 将会话写入 `.xycli/sessions/json/<uuid>.json`：
 
 - 字段使用 `camelCase`；
-- 临时文件与目标文件在同一目录；
+- 临时文件和目标文件位于同一目录；
 - 原子重命名避免半截 JSON；
-- 单进程内异步互斥避免同时覆盖；
-- 损坏的单个文件不阻断列表读取。
+- 单进程异步互斥避免同时覆盖；
+- 损坏的单个文件不阻断列表读取；
+- 恢复会话要求工作目录一致。
 
-恢复会话时要求工作目录一致，防止历史上下文被带到另一个仓库执行。
+跨进程锁、SQLite 迁移和上下文压缩尚未实现，进入 M5。
 
-## 8. CLI 与退出码
+## 11. CLI 命令和退出码
 
-CLI 支持单次 prompt、stdin 和 REPL。REPL 串行处理输入并通过会话 ID 延续上下文；`/new` 创建新会话，`/model` 和 `/turns` 修改后续请求配置。
+```text
+xycli [prompt]
+xycli run [prompt]
+xycli auth login|status|logout
+xycli config show|explain|set|path
+xycli doctor
+xycli --version
+```
 
 | 退出码 | 含义 |
 | ---: | --- |
 | 0 | 正常完成 |
 | 1 | 未完成、中断或一般运行错误 |
-| 2 | 参数或配置错误 |
+| 2 | 参数、配置或启动校验错误 |
 | 3 | 顶层权限错误 |
-| 4 | Provider 或网络错误 |
+| 4 | Provider、协议或网络错误 |
 | 5 | 工具致命错误 |
 
-## 9. 测试分层
+## 12. 测试分层
 
-1. 单元测试：权限矩阵、协议解析、命令规则和 Agent 状态；
-2. Agent 测试：MockProvider、多轮工具调用、轮次上限和会话落盘；
-3. 安全集成测试：路径逃逸、符号链接、哈希冲突、命令注入和权限拒绝；
-4. Provider HTTP 测试：本机临时服务检查 URL、认证头、请求体和响应解析；
-5. CLI 进程测试：真实二进制参数、stdin、退出码和本地模拟 API。
+1. 配置、凭据脱敏、事件、SSE 和重试单元测试；
+2. MockProvider 驱动的 Agent 多轮、状态和会话测试；
+3. 路径逃逸、符号链接、哈希冲突、命令注入和权限测试；
+4. 本机临时 HTTP 服务验证两个 Provider 的请求与流式协议；
+5. 真实 CLI 进程验证参数、stdin、输出模式、doctor 和退出码；
+6. CI 在 macOS、Linux 和 Windows 运行质量门禁。
 
-所有默认测试必须离线运行，不使用真实 API Key。
+默认测试不使用真实 API Key，不请求公网模型。
 
-## 10. 构建与发布
+## 13. 发布与演进约束
 
-唯一构建链是 Cargo：
+源码安装基线是 `cargo install --path crates/xycli-cli --locked --force`。CI 执行 fmt、Clippy、全目标测试、Release 构建和安装检查；Release 工作流按平台打包二进制并生成 SHA-256。
 
-```bash
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace --all-targets
-cargo build --workspace --release
-```
-
-本地全局安装使用 `cargo install --path crates/xycli-cli --locked --force`。正式跨平台发布将在 CI 中生成签名或校验和明确的二进制归档。
-
-## 11. 演进约束
-
-- 流式输出通过事件接口进入 Renderer，不能让 Provider 直接打印终端；
-- 重试只包围单次 Provider 请求，不能重放已成功的工具副作用；
-- 审批发生在工具输入校验之后、副作用之前；
-- MCP 与插件工具必须进入同一个 ToolRegistry、权限和审计链；
-- SQLite 替换 JSON 时保持 `SessionStore` 领域边界；
-- Computer Use 在审批、审计、恢复和跨平台发布成熟前不进入主线。
+后续约束：fallback 不得跨工具副作用边界；审批发生在输入校验之后、副作用之前；MCP 和插件必须进入统一 ToolRegistry；SQLite 替换 JSON 时保持 `SessionStore` 边界；Computer Use 在审批、审计、恢复和跨平台发布成熟前不进入主线。

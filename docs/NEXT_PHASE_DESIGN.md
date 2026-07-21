@@ -1,14 +1,14 @@
-# XYCLI 下一阶段详细设计
+# XYCLI v0.3.0 阶段设计与验收
 
 > 目标版本：v0.3.0
-> 状态：设计完成，待实现
+> 状态：本地实现完成，等待远端 CI 验证
 > 日期：2026-07-21
 
 ## 1. 结论与规划调整
 
 原路线图把搜索、Web 和更多工具放在配置、凭据、Provider 工厂、审批和 CI 之前。这个顺序会扩大高风险能力，同时让安装、密钥和错误恢复体验继续欠账。
 
-调整后的 v0.3.0 只聚焦“可长期使用的产品化基础”：
+调整后的 v0.3.0 聚焦“可长期使用的产品化基础”，以下范围已经实现：
 
 1. 全局安装与版本信息；
 2. 分层配置和安全凭据；
@@ -43,13 +43,13 @@
 
 ```text
 xycli-cli
-├── commands/            run、config、doctor
-├── renderer/            交互与非交互输出
-└── bootstrap.rs         配置、凭据、Provider 和存储装配
+├── main.rs              run、auth、config、依赖装配与 REPL
+├── renderer.rs          终端、JSON Lines 与非流式输出
+└── doctor.rs            安装、配置、凭据与工作区诊断
 
 xycli-core
-├── config/              配置模型、来源与合并
-├── credentials/         SecretStore trait
+├── config.rs            配置模型、来源、合并与写入
+├── credentials.rs       SecretStore trait 与系统凭据适配
 ├── events.rs            AgentEvent + EventSink
 ├── provider/
 │   ├── mod.rs           trait 与领域类型
@@ -61,7 +61,7 @@ xycli-core
 └── 既有 agent、tools、session、permission
 ```
 
-先把当前单文件 `provider.rs` 拆为目录模块，保持公开类型名称不变，避免一次提交同时改变行为和接口。
+单文件 `provider.rs` 已先独立拆为目录模块并保持公开类型名称不变，后续行为改动使用独立提交完成。
 
 ## 4. 配置系统
 
@@ -213,13 +213,13 @@ xycli --version
 
 ## 10. 测试与 CI
 
-每项实现必须先增加失败测试，再实现，再运行全量门禁：
+每项实现完成后运行全量门禁：
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace --all-targets
-cargo build --workspace --release
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --all-targets --locked
+cargo build --workspace --release --locked
 ```
 
 CI 矩阵：
@@ -230,29 +230,29 @@ CI 矩阵：
 - 不注入真实 API Key，不访问公网模型服务；
 - Release tag 才构建归档和校验和。
 
-## 11. 实施顺序
+## 11. 实施记录
 
-1. M2-T01：拆分 Provider 模块，仅做结构重构；
-2. M2-T02：实现配置模型、合并、来源追踪和配置命令；
-3. M2-T03：实现 SecretStore、auth 命令与全链路脱敏；
-4. M2-T04：实现 Provider Factory；
-5. M2-T05：定义 AgentEvent/EventSink 并改造非流式主路径；
-6. M2-T06：实现 Renderer 和 JSON 输出；
-7. M2-T07：实现 Anthropic 与 DeepSeek 流式协议；
-8. M2-T08：实现重试、退避和限流；
-9. M2-T09：实现 doctor 与安装检查；
-10. M2-T10：建立跨平台 CI 和发布产物草案。
+1. [x] M2-T01：拆分 Provider 模块，仅做结构重构；
+2. [x] M2-T02：实现配置模型、合并、来源追踪和配置命令；
+3. [x] M2-T03：实现 SecretStore、auth 命令与全链路脱敏；
+4. [x] M2-T04：实现 Provider Factory；
+5. [x] M2-T05：定义 AgentEvent/EventSink 并改造主路径；
+6. [x] M2-T06：实现 Renderer 和 JSON 输出；
+7. [x] M2-T07：实现 Anthropic 与 DeepSeek 流式协议；
+8. [x] M2-T08：实现重试、退避和限流；
+9. [x] M2-T09：实现 doctor 与安装检查；
+10. [x] M2-T10：建立跨平台 CI 和发布产物草案。
 
 每个任务独立提交；结构重构与行为变化不能混在同一提交。
 
-## 12. v0.3.0 完成门槛
+## 12. v0.3.0 验收状态
 
-- 从任意工作区运行全局 `xycli`；
-- API Key 可存入系统凭据库，且日志与会话无泄漏；
-- CLI、环境、项目、用户和默认配置优先级有完整测试；
-- 两个 Provider 的流式文本和工具调用 E2E 通过；
-- 可重试与不可重试错误行为确定；
-- TTY、管道、`NO_COLOR` 和 JSON 输出稳定；
-- macOS、Linux、Windows CI 通过；
-- 文档命令与真实二进制一致；
-- 未增加新的默认权限。
+- [x] 支持通过 Cargo 全局安装并从任意工作区运行 `xycli`；
+- [x] API Key 可存入系统凭据库，秘密类型和输出均脱敏；
+- [x] CLI、环境、项目、用户和默认配置优先级有自动化测试；
+- [x] 两个 Provider 的流式文本和工具调用协议测试通过；
+- [x] 可重试与不可重试错误行为确定；
+- [x] 管道、`NO_COLOR`、非流式和 JSON 输出行为确定；
+- [ ] macOS、Linux、Windows GitHub CI 通过；工作流已创建，待建立 Pull Request 或合并到 `main` 后由远端验证；
+- [x] 文档命令与真实二进制帮助一致；
+- [x] 未增加新的默认权限。

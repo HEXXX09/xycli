@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Rust / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - name: 检出源码
+        uses: actions/checkout@v4
+
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: 缓存 Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: 检查格式
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo fmt --all -- --check
+
+      - name: 运行 Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: 运行测试
+        run: cargo test --workspace --all-targets --locked
+
+      - name: 构建 Release
+        run: cargo build --workspace --release --locked
+
+      - name: 验证源码安装
+        run: cargo install --path crates/xycli-cli --locked --force --root "${{ runner.temp }}/xycli-install"

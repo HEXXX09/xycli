@@ -1,6 +1,6 @@
 # XYCLI 任务路线图
 
-> 当前技术基线：Rust-only v0.2.0。
+> 当前技术基线：Rust-only v0.3.0。
 > 状态更新时间：2026-07-21。
 
 ## 规划调整
@@ -18,8 +18,8 @@
 | 里程碑 | 目标 | 状态 |
 | --- | --- | --- |
 | M1 | Rust 核心迁移与旧 TS 退役 | 已完成 |
-| M2 | 产品化基础：配置、凭据、流式、CI | 待开始 |
-| M3 | Provider 扩展与容错 | 待开始 |
+| M2 | 产品化基础：配置、凭据、流式、CI | 本地完成，待远端 CI |
+| M3 | Provider 扩展与容错 | 下一阶段 |
 | M4 | 审批、脱敏、变更账本与撤销 | 待开始 |
 | M5 | SQLite、恢复与上下文管理 | 待开始 |
 | M6 | 搜索、Web 与 Git 专用工具 | 待开始 |
@@ -52,16 +52,18 @@ cargo build --workspace --release
 
 详细设计见 `NEXT_PHASE_DESIGN.md`。
 
-- [ ] M2-T01：拆分 Provider 模块，不改变外部行为；
-- [ ] M2-T02：实现分层配置、来源追踪和 config 命令；
-- [ ] M2-T03：实现系统凭据存储、auth 命令和秘密脱敏；
-- [ ] M2-T04：实现 Provider Factory；
-- [ ] M2-T05：实现 AgentEvent 与 EventSink；
-- [ ] M2-T06：实现 TTY、无颜色、非流式和 JSON Renderer；
-- [ ] M2-T07：实现 Anthropic 与 DeepSeek 流式协议；
-- [ ] M2-T08：实现错误分类、退避、限流和安全重试；
-- [ ] M2-T09：实现 doctor 与全局安装检查；
-- [ ] M2-T10：建立三平台 CI 和发布产物草案。
+- [x] M2-T01：拆分 Provider 模块，不改变外部行为；
+- [x] M2-T02：实现分层配置、来源追踪和 config 命令；
+- [x] M2-T03：实现系统凭据存储、auth 命令和秘密脱敏；
+- [x] M2-T04：实现 Provider Factory；
+- [x] M2-T05：实现 AgentEvent 与 EventSink；
+- [x] M2-T06：实现无颜色、非流式和 JSON Renderer；
+- [x] M2-T07：实现 Anthropic 与 DeepSeek 流式协议；
+- [x] M2-T08：实现错误分类、退避、限流和安全重试；
+- [x] M2-T09：实现 doctor 与全局安装检查；
+- [x] M2-T10：建立三平台 CI 和发布产物草案。
+
+M2 尚需建立 Pull Request 或合并到 `main`，由远端矩阵确认 macOS、Linux 和 Windows 实际运行结果；在此之前不把工作流文件等同于三平台已经通过。
 
 ## M3：Provider 扩展与容错
 

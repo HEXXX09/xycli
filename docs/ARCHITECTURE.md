@@ -1,61 +1,129 @@
 # XYCLI 系统架构
 
-> 当前仓库只有 Rust 生产与测试链路。旧 TypeScript 实现已于 2026-07-21 退役，可通过 Git 历史审计。
+> 当前基线：Rust-only v0.3.0。旧 TypeScript 实现已退役，可通过 Git 历史审计。
 
 ## 1. 系统定位
 
 XYCLI 是运行在开发者本机终端中的 AI 编程 Agent。它接收自然语言任务，通过模型推理、受控工具调用和本地会话持久化完成编码工作，不是常驻 Web 服务。
 
-主要外部边界包括模型 API、当前工作区文件系统和本地可执行程序。网络搜索、MCP、插件、审批中心等仍属于后续里程碑。
+当前外部边界包括模型 API、系统凭据库、当前工作区文件系统和本地可执行程序。搜索、Web、MCP、插件和审批中心属于后续里程碑。
 
 ## 2. Rust 工作区
 
 ```text
 Cargo workspace
-├── xycli-cli
-│   ├── clap 参数解析
-│   ├── 单次模式与交互模式
-│   ├── Ctrl+C 取消
-│   └── 退出码
-└── xycli-core
-    ├── agent.rs          Agent 主循环
-    ├── provider.rs       Anthropic / DeepSeek
-    ├── permission.rs     显式权限矩阵
-    ├── tools/            注册中心与三个内置工具
-    ├── session.rs        JSON 会话存储
-    ├── prompt.rs         系统提示词
-    └── error.rs          错误类别与退出码
+├── crates/xycli-cli
+│   ├── main.rs          命令、参数、装配、REPL 和退出码
+│   ├── renderer.rs      终端、JSON Lines 和非流式渲染
+│   └── doctor.rs        安装、配置、凭据和工作区诊断
+└── crates/xycli-core
+    ├── agent.rs         Agent 主循环和事件发送
+    ├── config.rs        分层配置、来源追踪和 TOML 写入
+    ├── credentials.rs   SecretStore、系统凭据和秘密类型
+    ├── events.rs        AgentEvent 与 EventSink
+    ├── provider/
+    │   ├── mod.rs       Provider trait 和领域类型
+    │   ├── factory.rs   配置与凭据到 Provider 实例
+    │   ├── anthropic.rs Anthropic 协议和 SSE
+    │   ├── deepseek.rs  DeepSeek 协议和 SSE
+    │   ├── stream.rs    流事件、Sink 和 SSE 解码
+    │   └── retry.rs     安全重试、退避和请求节流
+    ├── permission.rs    显式权限矩阵
+    ├── tools/           注册中心和三个内置工具
+    ├── session.rs       JSON 会话存储
+    ├── prompt.rs        中文系统提示词
+    └── error.rs         错误类别和退出码
 ```
 
-拆分为核心库和 CLI 的原因是让 Agent 运行时不依赖具体终端，后续桌面端、服务端或测试程序可以直接复用 `xycli-core`。
+`xycli-core` 不读取终端输入，也不直接打印输出。CLI 只负责组合、输入和渲染，因此后续桌面端、服务端或测试程序可以复用同一 Agent 运行时。
 
-## 3. 运行数据流
+## 3. 启动数据流
 
-1. CLI 校验 Provider、模型、最大轮次、会话 ID 和权限模式。
-2. CLI 初始化 Provider、ToolRegistry 与 JsonSessionStore。
-3. Agent Loop 创建新会话，或从 UUID 对应的 JSON 文件继续会话。
-4. Agent Loop 将历史消息、中文系统提示词和工具 JSON Schema 发给 Provider。
-5. Provider 返回最终文本或结构化工具调用。
-6. ToolRegistry 先执行工具级权限检查，再严格校验 JSON 输入。
-7. 工具执行路径或命令级安全检查，并接受超时和取消信号。
-8. 工具结果和审计记录写入会话，然后回传模型进入下一轮。
-9. 正常结束、达到轮次、输出截断、中断和错误分别保存为不同终态与退出码。
+```text
+命令行参数
+  ↓
+ConfigLoader：CLI > 环境 > 项目 > 用户 > 默认值
+  ↓
+SecretStore：Provider 环境变量 > 系统凭据库
+  ↓
+ProviderFactory：配置校验和具体 Provider 创建
+  ↓
+RetryingProvider：请求节流、重试、退避和取消
+  ↓
+Agent + ToolRegistry + SessionStore + EventSink
+```
 
-## 4. 核心接口
+配置或凭据错误会在 Agent 创建之前失败。普通配置文件只接受非秘密参数；Base URL 默认必须为 HTTPS，只有 `localhost` 和回环地址允许 HTTP 测试。
+
+## 4. Agent 运行数据流
+
+1. CLI 创建或恢复会话并选择 Renderer；
+2. Agent 构建历史消息、中文系统提示词和工具 JSON Schema；
+3. Provider 通过统一流接口发送文本、工具调用、用量和终止原因；
+4. Agent 将文本增量和状态变化转为 `AgentEvent`，自身不写 stdout；
+5. 工具调用参数聚合完成后，ToolRegistry 检查权限并严格校验输入；
+6. 工具执行路径或命令级安全检查，并接受超时和取消信号；
+7. 工具结果和审计记录写入会话，然后进入下一轮模型请求；
+8. 正常结束、达到轮次、输出截断、中断和错误保存为明确终态。
+
+## 5. 核心接口
 
 | 接口 | 职责 |
 | --- | --- |
-| `Provider` | 统一模型请求和工具调用响应 |
+| `Provider` | 统一非流式与流式模型请求 |
+| `ProviderStreamSink` | 接收厂商无关的 Provider 流事件 |
+| `ProviderFactory` | 校验配置、解析凭据并创建 Provider |
+| `EventSink` | 接收 Agent 状态、文本、工具和用量事件 |
 | `Tool` | 工具定义、运行时校验和异步执行 |
-| `ToolRegistry` | 注册、权限、超时、取消与统一错误 |
+| `ToolRegistry` | 注册、权限、超时、取消和统一错误 |
 | `SessionStore` | 会话创建、更新、读取和列表 |
 | `run_agent` | 驱动模型与工具之间的多轮闭环 |
 
-依赖均通过结构体字段或 trait 引用传入，不使用全局单例，因此可以用 MockProvider 和临时会话目录完成离线测试。
+依赖通过结构体字段或 trait 引用传入，不使用全局单例，因此可以使用 MockProvider、内存 EventSink 和临时会话目录完成离线测试。
 
-## 5. 权限与安全边界
+## 6. 配置与凭据
 
-权限检查分三层：
+配置合并顺序：
+
+```text
+CLI 参数
+  > 环境变量
+  > 工作区 .xycli/config.toml
+  > ~/.config/xycli/config.toml
+  > 内置默认值
+```
+
+每个最终值都记录 `ConfigSource`，供 `config show` 和 `config explain` 展示。`config set` 只允许白名单内的非秘密字段，并通过临时文件和重命名写入 TOML。
+
+API Key 查找顺序为 Provider 专用环境变量优先、系统凭据库其次。`SecretString` 在内存中使用可清零容器，Debug 和 Display 均脱敏。系统凭据库不可用时只提示使用环境变量，不降级创建明文 secret 文件。
+
+## 7. Provider、流式与重试
+
+Anthropic 使用 `/v1/messages`、`x-api-key` 和 `anthropic-version`；DeepSeek 使用 `/chat/completions` 和 Bearer Token。两者使用 `reqwest` 的 rustls 后端。
+
+厂商 SSE 先映射为统一 `ProviderStreamEvent`：
+
+- 文本按到达顺序增量发送；
+- 工具调用按索引聚合名称和 JSON 参数片段；
+- 只有完整参数才进入 Agent 工具执行；
+- 用量和结束原因归一化；
+- 半截 JSON、缺少终止事件和流中断返回协议错误。
+
+`RetryingProvider` 只包围当前模型请求。连接失败、超时、408、409、429 和 5xx 可重试；认证、参数、Schema 和内容错误不可重试。默认使用带抖动的指数退避并尊重 `Retry-After`，取消令牌可中断等待。流已经输出有效文本后不会重试，避免重复输出；已完成的工具副作用永远不在重试闭包内。
+
+## 8. 事件与输出
+
+Agent 发出以下领域事件：
+
+- `StateChanged`：运行状态变化；
+- `AssistantDelta`：助手文本增量；
+- `ToolStarted`、`ToolFinished`：工具生命周期；
+- `UsageUpdated`：Token 用量；
+- `Warning`：可恢复告警。
+
+CLI Renderer 决定具体表现：默认终端流式输出，`--no-stream` 聚合文本，`--json` 输出 JSON Lines，`--no-color` 或 `NO_COLOR` 禁用颜色。领域层不感知 TTY 样式。
+
+## 9. 权限与安全边界
 
 ```text
 PermissionMode 显式允许矩阵
@@ -69,48 +137,25 @@ PermissionMode 显式允许矩阵
 | `auto-safe` | 工作区文件读写和受限安全命令 |
 | `full-access` | 所有工具级别及任意本地可执行文件 |
 
-文件策略会规范化工作区根目录。已存在路径使用真实路径判断；待创建路径寻找最近的已存在祖先并解析符号链接。目标不在真实工作区根目录下时返回 `PATH_OUTSIDE_WORKSPACE`。
+文件策略会解析真实工作区和符号链接，阻止越界。命令始终通过 `tokio::process::Command` 的程序名和参数数组执行，不调用 shell；`auto-safe` 只允许受限的 `pwd`、`echo`、`ls` 和只读 Git 子命令；超时或取消会终止子进程，stdout 和 stderr 均有保留上限。
 
-命令工具有以下不变量：
+## 10. 会话与终态
 
-- `command` 只能是单个程序名，参数必须放在 `args`；
-- 始终使用 `tokio::process::Command`，不调用 shell；
-- `auto-safe` 只允许 `pwd`、`echo`、工作区内的 `ls`，以及 `git status/diff/log/show`；
-- 安全命令必须解析到工作区外的可信 PATH，防止仓库内同名程序劫持；
-- stdout 和 stderr 会持续排空但最多各保留 100,000 字节，避免输出导致内存无限增长；
-- 超时或取消会终止子进程。
-
-## 6. Provider 层
-
-Anthropic 使用 `/v1/messages`、`x-api-key` 和 `anthropic-version`；DeepSeek 使用 `/chat/completions` 和 Bearer Token。两者都通过 `reqwest` 的 rustls 后端访问，不依赖系统 OpenSSL。
-
-Provider 负责内部消息与厂商协议互转、文本和工具调用归一化、Token 用量归一化、HTTP 错误映射以及取消正在等待的网络请求。
-
-默认测试会启动绑定到 `127.0.0.1` 的临时 HTTP 服务，验证实际 URL、请求头、请求体和响应解析，不访问真实模型 API。
-
-## 7. 会话与兼容
-
-会话保存在 `.xycli/sessions/json/<uuid>.json`。Rust 结构体使用 `camelCase` 字段和稳定状态值，便于后续存储迁移和兼容读取。
-
-写入流程为：序列化到同目录唯一临时文件，然后原子重命名。单进程内另有异步互斥，防止并发更新互相覆盖。损坏的单个会话文件不会阻断会话列表。
-
-## 8. 终态和退出码
+会话保存在 `.xycli/sessions/json/<uuid>.json`。字段使用 `camelCase`，写入采用同目录临时文件后原子重命名，单进程内有异步互斥。恢复会话要求工作目录一致。
 
 | 状态 | 退出码 | 含义 |
 | --- | ---: | --- |
 | `completed` | 0 | 模型正常确认结束 |
 | `incomplete` / `interrupted` | 1 | 未完成或用户中断 |
-| 参数校验错误 | 2 | CLI 或运行配置无效 |
+| 参数或配置错误 | 2 | CLI、配置或启动校验失败 |
 | 权限错误 | 3 | 顶层权限错误 |
-| Provider 错误 | 4 | 模型或网络适配失败 |
+| Provider 错误 | 4 | 模型、协议或网络失败 |
 | Tool 致命错误 | 5 | 工具运行时错误 |
 
-单个工具调用失败会作为工具结果返回模型，并记录为 `failed` 或 `denied`；不会无条件终止整个 Agent。
+## 11. 构建与分发
 
-## 9. 构建与分发
+Cargo 是唯一构建入口。CI 在 Linux、macOS 和 Windows 执行格式、Clippy、测试、Release 构建和源码安装验证。`v*` 标签触发多平台归档和 SHA-256 生成；实际发布仍由 GitHub 环境和仓库权限控制。
 
-Cargo 是唯一构建入口。开发门禁包括格式、Clippy、全目标测试和 Release 构建。本地可通过 `cargo install --path crates/xycli-cli --locked` 安装全局命令。
+## 12. 后续演进
 
-## 10. 后续演进
-
-下一阶段先实现配置与系统凭据、Provider Factory、统一事件协议、流式 Renderer、重试和 CI。审批与安全撤销完成后，再增加 Web、MCP 和插件。Rust 核心库保持接口隔离，避免这些能力反向耦合 CLI。
+M3 增加 OpenAI、OpenAI-compatible、能力探测、熔断和显式 fallback。审批、脱敏、变更账本和撤销完成后，再增加搜索、Web、MCP 和插件。所有扩展工具必须进入同一 ToolRegistry、权限和审计链。

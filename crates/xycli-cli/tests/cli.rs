@@ -209,6 +209,21 @@ fn config_set_写入项目配置并可解释来源() {
 }
 
 #[test]
+fn doctor_无需访问模型即可输出诊断() {
+    let dir = tempdir().unwrap();
+    let output = xycli()
+        .current_dir(dir.path())
+        .env("ANTHROPIC_API_KEY", "test-key")
+        .args(["doctor", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["ok"], true);
+    assert!(report["checks"].as_array().unwrap().len() >= 4);
+}
+
+#[test]
 fn rust_cli_真实进程完成工具循环并保存会话() {
     let dir = tempdir().unwrap();
     fs::write(dir.path().join("fixture.txt"), "fixture content").unwrap();

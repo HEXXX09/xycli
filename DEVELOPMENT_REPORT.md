@@ -1,60 +1,77 @@
 # XYCLI 开发报告
 
 > 更新时间：2026-07-21
+> 当前版本：v0.3.0
 
 ## 总结
 
-XYCLI 已完成 Rust 核心迁移和旧 TypeScript 运行时退役。当前仓库只有 Cargo workspace 一条构建、测试和运行链路，避免双实现继续产生行为漂移。
+XYCLI 已完成 M2 产品化基础阶段。仓库保持 Rust-only，核心能力从“能运行的 Agent”扩展为“可配置、可安全保存凭据、可流式输出、可诊断并可持续发布的 CLI”。
 
-项目远端：`https://github.com/HEXXX09/xycli`
+本阶段采用独立提交拆分结构重构与行为变更；旧 TypeScript 实现不再参与构建、测试或发布。
 
 ## 已完成
 
-| 项目 | 状态 |
+| 能力 | 状态 |
 | --- | --- |
-| Rust workspace 与工具链配置 | 已完成 |
-| 独立 `xycli-core` 和 `xycli` CLI | 已完成 |
-| Agent 循环、终态、轮次与取消 | 已完成 |
-| Anthropic 与 DeepSeek HTTP Provider | 已完成 |
-| 权限矩阵和严格工具输入校验 | 已完成 |
-| 工作区路径与符号链接隔离 | 已完成 |
-| 原子文件写入和哈希冲突检查 | 已完成 |
-| 无 shell 子进程、白名单、超时和输出上限 | 已完成 |
-| JSON 会话兼容与原子持久化 | 已完成 |
-| Rust 单元、HTTP、Agent、安全和 CLI 测试 | 已完成 |
-| 旧 TypeScript 源码、测试与 npm 构建链删除 | 已完成 |
-| Rust-only 中文文档和调整后的路线图 | 已完成 |
+| Provider 目录化拆分 | 已完成 |
+| Anthropic 与 DeepSeek SSE 流式文本、工具调用聚合 | 已完成 |
+| 分层配置、来源追踪和 TOML 写入 | 已完成 |
+| 系统凭据存储、环境变量降级和秘密脱敏 | 已完成 |
+| Provider Factory 与启动前校验 | 已完成 |
+| AgentEvent、EventSink 和 CLI Renderer | 已完成 |
+| JSON Lines、非流式和无颜色输出 | 已完成 |
+| 错误分类、指数退避、抖动和 Retry-After | 已完成 |
+| 最小请求间隔和取消感知 | 已完成 |
+| doctor 与全局安装检查 | 已完成 |
+| macOS、Linux、Windows CI | 已完成 |
+| 多平台 Release 归档和 SHA-256 工作流 | 已完成 |
 
 ## 当前架构
 
 ```text
-Rust CLI
-  → Agent Loop
-    → Anthropic / DeepSeek Provider
-    → PermissionMode + ToolRegistry
-      → file_read / file_write / terminal_exec
-    → JsonSessionStore
+CLI 命令与 Renderer
+  → 配置解析 + 凭据解析 + Provider Factory
+    → RetryingProvider
+      → Anthropic / DeepSeek 流式 Provider
+        → Agent Loop + AgentEvent
+          → PermissionMode + ToolRegistry
+            → file_read / file_write / terminal_exec
+          → JsonSessionStore
 ```
+
+## 可靠性与安全不变量
+
+- 配置优先级为 CLI、环境、项目、用户、默认值；
+- 普通 TOML 不允许保存 API Key、Token 或 Secret；
+- Secret 的 Debug、Display 和配置输出不会显示原文；
+- Base URL 默认要求 HTTPS，仅本机协议测试允许 HTTP；
+- 重试只包围单次模型请求，不重放已经执行成功的工具；
+- SSE 已产生文本后发生中断时不自动重试；
+- 工具仍通过权限矩阵、严格输入校验和工作区安全策略；
+- CI 和默认测试不需要真实 API Key，也不请求公网模型。
 
 ## 验收命令
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace --all-targets
-cargo build --workspace --release
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --all-targets --locked
+cargo build --workspace --release --locked
+./target/release/xycli --version
 ./target/release/xycli --help
+./target/release/xycli doctor --json
+cargo install --path crates/xycli-cli --locked --force
 ```
 
-## 当前主要边界
+## 当前边界
 
-- Provider 主路径仍为非流式请求；
-- 密钥只能通过环境变量提供；
-- Provider 没有统一配置工厂、重试、限流和 fallback；
-- JSON 会话没有跨进程并发控制、查询命令和上下文压缩；
-- 写操作尚无交互式审批、敏感信息脱敏和可验证撤销；
-- 尚未实现 MCP、插件、Web、浏览器和 Computer Use。
+- 只支持 Anthropic 和 DeepSeek，OpenAI 与兼容网关进入 M3；
+- 已有重试与节流，但熔断和显式 fallback 尚未实现；
+- JSON 会话尚无跨进程锁、查询命令和上下文压缩；
+- 写操作尚无逐次交互审批、敏感内容规则脱敏、变更账本和撤销；
+- 尚未实现搜索、Web、Git 专用工具、Plan 模式、MCP 与插件；
+- Release 工作流已定义，实际各平台结果需在 GitHub Actions 运行后确认。
 
-## 下一步
+## 下一阶段建议
 
-先完成配置与凭据、全局安装体验、统一事件流和 CI，再实现 Provider 流式与容错。审批、变更账本和撤销提前到扩展高风险工具之前。具体边界和验收条件见 `docs/NEXT_PHASE_DESIGN.md`。
+按路线图进入 M3 Provider 扩展与容错，但建议仍拆成可独立验收的小阶段：先实现 OpenAI 与 OpenAI-compatible 协议复用，再做能力探测、熔断和显式 fallback。任何 fallback 都必须保留清晰的 Provider、模型和错误审计信息，且不能跨越已发生工具副作用的边界。
